@@ -32,6 +32,6 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -DTG_CLIENT_STDIO_BUILD_TESTS=ON
       - name: Build
-        run: cmake --build build --config Debug --target tg_protocol_envelope_test --parallel 2
+        run: cmake --build build --config Debug --parallel 2
       - name: Test
         run: ctest --test-dir build -C Debug --output-on-failure

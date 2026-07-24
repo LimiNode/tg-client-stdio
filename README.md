@@ -58,6 +58,25 @@ Example request:
 {"protocol_version":1,"message_type":"request","request_id":1,"operation":"hello","payload":{}}
 ```
 
+## Python Host Client
+
+The package also includes a small host-side helper for code that already owns a
+worker process and has connected binary stdin/stdout streams:
+
+```python
+from tg_client_stdio_worker.client import JsonlWorkerClient
+
+client = JsonlWorkerClient(worker_stdout, worker_stdin)
+hello = client.hello({"client_name": "demo"})
+dialogs = client.dialogs()
+
+messages = []
+summary = client.stream_messages({"chat": "-1001234567890"}, messages.append)
+```
+
+Process spawning and restart policy intentionally stay outside this helper so a
+supervisor can decide how sessions, proxies and credentials are isolated.
+
 ## C++ Helper
 
 The first C++ layer is intentionally small: it builds protocol envelopes and

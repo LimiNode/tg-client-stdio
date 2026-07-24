@@ -21,6 +21,6 @@ stdio worker and C++ client kit.
   `python -m unittest discover -s tests/python`.
 - C++ header/protocol changes:
   `cmake -S . -B build -DTG_CLIENT_STDIO_BUILD_TESTS=ON`
-  then `cmake --build build --config Debug --target tg_protocol_envelope_test`.
+  then `cmake --build build --config Debug`.
 - Run `ctest --test-dir build -C Debug --output-on-failure` when CMake tests
   are built.

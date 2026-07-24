@@ -33,4 +33,13 @@ if(TG_CLIENT_STDIO_BUILD_TESTS)
             tg-client-stdio::tg_client_stdio
     )
     add_test(NAME tg_protocol_envelope_test COMMAND tg_protocol_envelope_test)
+
+    add_executable(tg_client_stdio_client_test
+        tests/cpp/client_test.cpp
+    )
+    target_link_libraries(tg_client_stdio_client_test
+        PRIVATE
+            tg-client-stdio::tg_client_stdio
+    )
+    add_test(NAME tg_client_stdio_client_test COMMAND tg_client_stdio_client_test)
 endif()

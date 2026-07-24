@@ -4,7 +4,8 @@ import argparse
 import sys
 
 from .protocol import DEFAULT_MAX_JSONL_RECORD_BYTES, MIN_MAX_JSONL_RECORD_BYTES
-from .server import JsonlWorkerServer, MockTelegramBackend, ServerConfig
+from .backend import MockTelegramBackend
+from .server import JsonlWorkerServer, ServerConfig
 
 
 def jsonl_byte_limit(value: str) -> int:
