@@ -1,0 +1,375 @@
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import unittest
+from collections.abc import Iterable
+from typing import Any
+
+from tg_client_stdio_worker.cli import build_parser
+from tg_client_stdio_worker.protocol import (
+    MIN_MAX_JSONL_RECORD_BYTES,
+    Envelope,
+    ProtocolError,
+    decode_envelope,
+    encode_envelope,
+)
+from tg_client_stdio_worker.server import JsonlWorkerServer, MockTelegramBackend, ServerConfig
+
+
+def request(request_id: int, operation: str, payload: dict | None = None) -> bytes:
+    return encode_envelope(
+        Envelope(
+            message_type="request",
+            request_id=request_id,
+            operation=operation,
+            payload=payload or {},
+        ),
+        max_jsonl_bytes=1024 * 1024,
+    )
+
+
+class ProtocolTest(unittest.TestCase):
+    def test_round_trips_envelope(self) -> None:
+        line = request(7, "hello", {"client_name": "unit-test"})
+
+        envelope = decode_envelope(line)
+
+        self.assertEqual(envelope.protocol_version, 1)
+        self.assertEqual(envelope.message_type, "request")
+        self.assertEqual(envelope.request_id, 7)
+        self.assertEqual(envelope.operation, "hello")
+        self.assertEqual(envelope.payload["client_name"], "unit-test")
+
+    def test_mock_export_streams_messages(self) -> None:
+        input_stream = io.BytesIO(
+            request(1, "hello") +
+            request(2, "dialogs.list") +
+            request(3, "messages.export", {"chat": "-10042"}) +
+            request(4, "shutdown")
+        )
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=input_stream,
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+        )
+
+        self.assertEqual(server.run(), 0)
+
+        records = [
+            json.loads(line)
+            for line in output_stream.getvalue().decode("utf-8").splitlines()
+            if line
+        ]
+        self.assertEqual(records[0]["payload"]["capabilities"]["max_jsonl_record_bytes"], 1024 * 1024)
+        self.assertEqual(records[0]["message_type"], "response")
+        self.assertEqual(records[0]["operation"], "hello")
+        self.assertEqual(records[1]["operation"], "dialogs.list")
+
+        export_records = [item for item in records if item["request_id"] == 3]
+        self.assertEqual(
+            [item["operation"] for item in export_records],
+            ["export.started", "export.message", "export.message", "messages.export"],
+        )
+        self.assertEqual(export_records[-1]["message_type"], "response")
+        self.assertEqual(export_records[-1]["payload"]["messages"], 2)
+
+    def test_rejects_oversized_inbound_record(self) -> None:
+        input_stream = io.BytesIO(request(1, "hello", {"padding": "x" * 512}))
+        output_stream = io.BytesIO()
+        server = JsonlWorkerServer(
+            input_stream=input_stream,
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+            config=ServerConfig(max_jsonl_bytes=MIN_MAX_JSONL_RECORD_BYTES),
+        )
+
+        self.assertEqual(server.run(), 1)
+        record = json.loads(output_stream.getvalue().decode("utf-8"))
+        self.assertEqual(record["message_type"], "error")
+        self.assertEqual(record["payload"]["code"], "jsonl_record_too_large")
+
+    def test_hello_fits_minimum_jsonl_limit(self) -> None:
+        input_stream = io.BytesIO(request(1, "hello"))
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=input_stream,
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+            config=ServerConfig(max_jsonl_bytes=MIN_MAX_JSONL_RECORD_BYTES),
+        )
+
+        self.assertEqual(server.run(), 0)
+        self.assertLessEqual(
+            len(output_stream.getvalue()),
+            MIN_MAX_JSONL_RECORD_BYTES,
+        )
+        record = json.loads(output_stream.getvalue().decode("utf-8"))
+        self.assertEqual(record["operation"], "hello")
+
+    def test_payload_validation_error_keeps_request_terminal(self) -> None:
+        raw = (
+            b'{"protocol_version":1,"message_type":"request","request_id":42,'
+            b'"operation":"messages.export","payload":[]}\n'
+        )
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=io.BytesIO(raw),
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+        )
+
+        self.assertEqual(server.run(), 0)
+        record = json.loads(output_stream.getvalue().decode("utf-8"))
+        self.assertEqual(record["message_type"], "error")
+        self.assertEqual(record["request_id"], 42)
+        self.assertEqual(record["operation"], "messages.export")
+        self.assertEqual(record["payload"]["code"], "invalid_payload")
+
+    def test_unsupported_version_keeps_request_terminal_when_identity_is_known(self) -> None:
+        raw = (
+            b'{"protocol_version":999,"message_type":"request","request_id":43,'
+            b'"operation":"hello","payload":{}}\n'
+        )
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=io.BytesIO(raw),
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+        )
+
+        self.assertEqual(server.run(), 0)
+        record = json.loads(output_stream.getvalue().decode("utf-8"))
+        self.assertEqual(record["message_type"], "error")
+        self.assertEqual(record["request_id"], 43)
+        self.assertEqual(record["operation"], "hello")
+        self.assertEqual(record["payload"]["code"], "unsupported_protocol_version")
+
+    def test_malformed_uncorrelated_json_is_session_fatal(self) -> None:
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=io.BytesIO(b'{"protocol_version":1,\n'),
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+        )
+
+        self.assertEqual(server.run(), 1)
+        record = json.loads(output_stream.getvalue().decode("utf-8"))
+        self.assertEqual(record["message_type"], "error")
+        self.assertEqual(record["request_id"], 0)
+        self.assertTrue(record["payload"]["fatal"])
+
+    def test_unterminated_jsonl_record_is_session_fatal(self) -> None:
+        raw = b'{"protocol_version":1,"message_type":"request","request_id":1,"operation":"hello","payload":{}}'
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=io.BytesIO(raw),
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+        )
+
+        self.assertEqual(server.run(), 1)
+        record = json.loads(output_stream.getvalue().decode("utf-8"))
+        self.assertEqual(record["payload"]["code"], "unterminated_jsonl_record")
+        self.assertTrue(record["payload"]["fatal"])
+
+    def test_rejects_boolean_protocol_version_and_request_id(self) -> None:
+        raw = (
+            b'{"protocol_version":true,"message_type":"request","request_id":true,'
+            b'"operation":"hello","payload":{}}\n'
+        )
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=io.BytesIO(raw),
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+        )
+
+        self.assertEqual(server.run(), 1)
+        record = json.loads(output_stream.getvalue().decode("utf-8"))
+        self.assertEqual(record["message_type"], "error")
+        self.assertEqual(record["request_id"], 0)
+        self.assertEqual(record["payload"]["code"], "unsupported_protocol_version")
+        self.assertTrue(record["payload"]["fatal"])
+
+    def test_rejects_boolean_request_id(self) -> None:
+        raw = (
+            b'{"protocol_version":1,"message_type":"request","request_id":true,'
+            b'"operation":"hello","payload":{}}\n'
+        )
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=io.BytesIO(raw),
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+        )
+
+        self.assertEqual(server.run(), 1)
+        record = json.loads(output_stream.getvalue().decode("utf-8"))
+        self.assertEqual(record["message_type"], "error")
+        self.assertEqual(record["request_id"], 0)
+        self.assertEqual(record["payload"]["code"], "invalid_request_id")
+        self.assertTrue(record["payload"]["fatal"])
+
+    def test_rejects_request_id_larger_than_uint64(self) -> None:
+        raw = (
+            b'{"protocol_version":1,"message_type":"request",'
+            b'"request_id":18446744073709551616,"operation":"hello","payload":{}}\n'
+        )
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=io.BytesIO(raw),
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+        )
+
+        self.assertEqual(server.run(), 1)
+        record = json.loads(output_stream.getvalue().decode("utf-8"))
+        self.assertEqual(record["message_type"], "error")
+        self.assertEqual(record["request_id"], 0)
+        self.assertEqual(record["payload"]["code"], "invalid_request_id")
+        self.assertTrue(record["payload"]["fatal"])
+
+    def test_server_config_rejects_too_small_jsonl_limit(self) -> None:
+        with self.assertRaises(ValueError):
+            ServerConfig(max_jsonl_bytes=0)
+        with self.assertRaises(ValueError):
+            ServerConfig(max_jsonl_bytes=-2)
+        with self.assertRaises(ValueError):
+            ServerConfig(max_jsonl_bytes=MIN_MAX_JSONL_RECORD_BYTES - 1)
+
+    def test_cli_rejects_too_small_jsonl_limit(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                build_parser().parse_args(["--mock", "--max-jsonl-bytes", "-2"])
+
+    def test_rejects_nan_and_infinity_on_input(self) -> None:
+        for constant in (b"NaN", b"Infinity", b"-Infinity"):
+            raw = (
+                b'{"protocol_version":1,"message_type":"request","request_id":47,'
+                b'"operation":"hello","payload":{"value":' + constant + b"}}\n"
+            )
+            output_stream = io.BytesIO()
+
+            server = JsonlWorkerServer(
+                input_stream=io.BytesIO(raw),
+                output_stream=output_stream,
+                error_stream=io.StringIO(),
+                backend=MockTelegramBackend(),
+            )
+
+            self.assertEqual(server.run(), 1)
+            record = json.loads(output_stream.getvalue().decode("utf-8"))
+            self.assertEqual(record["message_type"], "error")
+            self.assertEqual(record["request_id"], 0)
+            self.assertEqual(record["payload"]["code"], "invalid_json")
+            self.assertTrue(record["payload"]["fatal"])
+
+    def test_rejects_nan_on_output(self) -> None:
+        with self.assertRaises(ProtocolError):
+            encode_envelope(
+                Envelope(
+                    message_type="response",
+                    request_id=1,
+                    operation="hello",
+                    payload={"value": float("nan")},
+                ),
+                max_jsonl_bytes=1024 * 1024,
+            )
+
+    def test_oversized_export_event_returns_terminal_error(self) -> None:
+        class LargeMessageBackend(MockTelegramBackend):
+            def iter_export_messages(self, query: dict[str, Any]) -> Iterable[dict[str, Any]]:
+                yield {
+                    "chat_id": "-100",
+                    "message_id": 1,
+                    "date_ms": 1,
+                    "text": "x" * 512,
+                }
+
+        output_stream = io.BytesIO()
+        server = JsonlWorkerServer(
+            input_stream=io.BytesIO(request(44, "messages.export")),
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=LargeMessageBackend(),
+            config=ServerConfig(max_jsonl_bytes=MIN_MAX_JSONL_RECORD_BYTES),
+        )
+
+        self.assertEqual(server.run(), 0)
+        records = [
+            json.loads(line)
+            for line in output_stream.getvalue().decode("utf-8").splitlines()
+            if line
+        ]
+        self.assertEqual(records[0]["operation"], "export.started")
+        self.assertEqual(records[1]["message_type"], "error")
+        self.assertEqual(records[1]["request_id"], 44)
+        self.assertEqual(records[1]["operation"], "messages.export")
+        self.assertEqual(records[1]["payload"]["code"], "jsonl_record_too_large")
+
+    def test_unserializable_terminal_error_fails_session(self) -> None:
+        huge_operation = "x" * 360
+        raw = (
+            b'{"protocol_version":1,"message_type":"request","request_id":45,'
+            b'"operation":"' + huge_operation.encode("ascii") + b'","payload":[]}\n'
+        )
+        output_stream = io.BytesIO()
+        errors = io.StringIO()
+        server = JsonlWorkerServer(
+            input_stream=io.BytesIO(raw),
+            output_stream=output_stream,
+            error_stream=errors,
+            backend=MockTelegramBackend(),
+            config=ServerConfig(max_jsonl_bytes=MIN_MAX_JSONL_RECORD_BYTES),
+        )
+
+        self.assertEqual(server.run(), 1)
+        self.assertEqual(output_stream.getvalue(), b"")
+        self.assertIn("failed to serialize", errors.getvalue())
+
+    def test_lone_surrogate_operation_does_not_crash_worker(self) -> None:
+        raw = (
+            b'{"protocol_version":1,"message_type":"request","request_id":46,'
+            b'"operation":"\\ud800","payload":{}}\n'
+        )
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=io.BytesIO(raw),
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+        )
+
+        self.assertEqual(server.run(), 0)
+        self.assertIn(b"\\ud800", output_stream.getvalue())
+        record = json.loads(output_stream.getvalue().decode("ascii"))
+        self.assertEqual(record["message_type"], "error")
+        self.assertEqual(record["request_id"], 46)
+        self.assertEqual(record["payload"]["code"], "unknown_operation")
+
+
+if __name__ == "__main__":
+    unittest.main()
