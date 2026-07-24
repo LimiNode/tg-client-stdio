@@ -4,6 +4,14 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Protocol
 
 
+class BackendError(RuntimeError):
+    def __init__(self, code: str, message: str, fatal: bool = False) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.fatal = fatal
+
+
 @dataclass(frozen=True)
 class Dialog:
     chat_id: str
@@ -96,6 +104,9 @@ class TelegramBackend(Protocol):
     def iter_export_messages(self, query: ExportQuery) -> Iterable[RawMessage]:
         ...
 
+    def close(self) -> None:
+        ...
+
 
 class MockTelegramBackend:
     """Deterministic backend used by protocol tests and early host integration."""
@@ -150,6 +161,9 @@ class MockTelegramBackend:
                 break
             emitted += 1
             yield message
+
+    def close(self) -> None:
+        pass
 
 
 def _stringish(value: Any, name: str) -> str:

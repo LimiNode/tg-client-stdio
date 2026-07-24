@@ -5,7 +5,7 @@ from dataclasses import replace
 from typing import Any, BinaryIO, TextIO
 
 from . import __version__
-from .backend import ExportQuery, MockTelegramBackend, TelegramBackend
+from .backend import BackendError, ExportQuery, MockTelegramBackend, TelegramBackend
 from .protocol import (
     DEFAULT_MAX_JSONL_RECORD_BYTES,
     Envelope,
@@ -47,8 +47,15 @@ class JsonlWorkerServer:
         self._backend = backend
         self._config = config or ServerConfig()
         self._shutdown_requested = False
+        self._exit_code = 0
 
     def run(self) -> int:
+        try:
+            return self._run_loop()
+        finally:
+            self._close_backend()
+
+    def _run_loop(self) -> int:
         while not self._shutdown_requested:
             raw = self._input.readline(self._config.max_jsonl_bytes + 1)
             if raw == b"":
@@ -98,7 +105,13 @@ class JsonlWorkerServer:
                     return 1
                 self._write_session_error("internal_error", "unexpected worker error", fatal=True)
                 return 1
-        return 0
+        return self._exit_code
+
+    def _close_backend(self) -> None:
+        try:
+            self._backend.close()
+        except Exception as exc:
+            print(f"failed to close backend: {exc}", file=self._error)
 
     def _handle_request(self, request: Envelope) -> None:
         if request.request_id == 0:
@@ -110,7 +123,11 @@ class JsonlWorkerServer:
             return
 
         if request.operation == "dialogs.list":
-            dialogs = [dialog.to_payload() for dialog in self._backend.dialogs()]
+            try:
+                dialogs = [dialog.to_payload() for dialog in self._backend.dialogs()]
+            except BackendError as exc:
+                self._write_backend_error(request, exc)
+                return
             self._write(response(request, {"dialogs": dialogs}))
             return
 
@@ -126,12 +143,16 @@ class JsonlWorkerServer:
             backend_query = query
             if query.limit is not None:
                 backend_query = replace(query, limit=query.limit + 1)
-            for message in self._backend.iter_export_messages(backend_query):
-                if query.limit is not None and count >= query.limit:
-                    truncated = True
-                    break
-                self._write(event(request.request_id, "export.message", {"message": message.to_payload()}))
-                count += 1
+            try:
+                for message in self._backend.iter_export_messages(backend_query):
+                    if query.limit is not None and count >= query.limit:
+                        truncated = True
+                        break
+                    self._write(event(request.request_id, "export.message", {"message": message.to_payload()}))
+                    count += 1
+            except BackendError as exc:
+                self._write_backend_error(request, exc)
+                return
             self._write(response(request, {"messages": count, "truncated": truncated}))
             return
 
@@ -159,6 +180,12 @@ class JsonlWorkerServer:
     def _write(self, envelope: Envelope) -> None:
         self._output.write(encode_envelope(envelope, self._config.max_jsonl_bytes))
         self._output.flush()
+
+    def _write_backend_error(self, request: Envelope, exc: BackendError) -> None:
+        self._write(error(request, exc.code, exc.message, exc.fatal))
+        if exc.fatal:
+            self._shutdown_requested = True
+            self._exit_code = 1
 
     def _write_session_error(self, code: str, message: str, fatal: bool) -> None:
         try:
