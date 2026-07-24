@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 from typing import Any, BinaryIO, TextIO
 
 from . import __version__
@@ -121,10 +122,17 @@ class JsonlWorkerServer:
                 return
             self._write(event(request.request_id, "export.started", {}))
             count = 0
-            for message in self._backend.iter_export_messages(query):
+            truncated = False
+            backend_query = query
+            if query.limit is not None:
+                backend_query = replace(query, limit=query.limit + 1)
+            for message in self._backend.iter_export_messages(backend_query):
+                if query.limit is not None and count >= query.limit:
+                    truncated = True
+                    break
                 self._write(event(request.request_id, "export.message", {"message": message.to_payload()}))
                 count += 1
-            self._write(response(request, {"messages": count, "truncated": False}))
+            self._write(response(request, {"messages": count, "truncated": truncated}))
             return
 
         if request.operation == "shutdown":

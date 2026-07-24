@@ -4,6 +4,16 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
+
+static_assert(!std::is_copy_constructible<tg_client_stdio::Client>::value,
+              "tg-client-stdio Client must not be copy-constructible");
+static_assert(!std::is_copy_assignable<tg_client_stdio::Client>::value,
+              "tg-client-stdio Client must not be copy-assignable");
+static_assert(!std::is_move_constructible<tg_client_stdio::Client>::value,
+              "tg-client-stdio Client must not be move-constructible");
+static_assert(!std::is_move_assignable<tg_client_stdio::Client>::value,
+              "tg-client-stdio Client must not be move-assignable");
 
 namespace {
 
@@ -55,16 +65,53 @@ void expect_read_record_requires_lf() {
 }
 
 void expect_read_record_enforces_limit() {
-    std::istringstream input("{\"padding\":\"xxxxxxxx\"}\n");
+    std::istringstream input("{\"padding\":\"" + std::string(512, 'x') + "\"}\n");
 
     bool threw = false;
     try {
-        (void)tg_client_stdio::read_jsonl_record(input, 8);
+        (void)tg_client_stdio::read_jsonl_record(
+            input,
+            tg_client_stdio::kMinMaxJsonlRecordBytes);
     } catch (const std::runtime_error&) {
         threw = true;
     }
     if (!threw) {
         throw std::runtime_error("oversized inbound JSONL record was accepted");
+    }
+}
+
+void expect_rejects_too_small_read_limit() {
+    std::istringstream input;
+
+    bool threw = false;
+    try {
+        (void)tg_client_stdio::read_jsonl_record(
+            input,
+            tg_client_stdio::kMinMaxJsonlRecordBytes - 1);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    if (!threw) {
+        throw std::runtime_error("too-small read limit was accepted");
+    }
+}
+
+void expect_rejects_too_small_client_limit() {
+    std::istringstream input;
+    std::ostringstream output;
+
+    bool threw = false;
+    try {
+        tg_client_stdio::Client client(
+            input,
+            output,
+            tg_client_stdio::ClientConfig{
+                tg_client_stdio::kMinMaxJsonlRecordBytes - 1});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    if (!threw) {
+        throw std::runtime_error("too-small Client limit was accepted");
     }
 }
 
@@ -74,5 +121,7 @@ int main() {
     expect_send_request_allocates_ids();
     expect_read_record_requires_lf();
     expect_read_record_enforces_limit();
+    expect_rejects_too_small_read_limit();
+    expect_rejects_too_small_client_limit();
     return 0;
 }

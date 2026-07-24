@@ -50,8 +50,10 @@ void expect_throws_oversized_jsonl() {
         const auto request = tg_client_stdio::make_request(
             4,
             "messages.export",
-            R"({"chat":"-100"})");
-        (void)tg_client_stdio::encode_envelope_jsonl(request, 32);
+            "{\"padding\":\"" + std::string(512, 'x') + "\"}");
+        (void)tg_client_stdio::encode_envelope_jsonl(
+            request,
+            tg_client_stdio::kMinMaxJsonlRecordBytes);
     } catch (const std::invalid_argument&) {
         threw = true;
     }

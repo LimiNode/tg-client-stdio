@@ -6,6 +6,7 @@ from typing import Any, BinaryIO
 
 from .protocol import (
     DEFAULT_MAX_JSONL_RECORD_BYTES,
+    MIN_MAX_JSONL_RECORD_BYTES,
     Envelope,
     ProtocolError,
     decode_envelope,
@@ -39,11 +40,14 @@ class JsonlWorkerClient:
         *,
         max_jsonl_bytes: int = DEFAULT_MAX_JSONL_RECORD_BYTES,
     ) -> None:
-        if max_jsonl_bytes <= 0:
-            raise ValueError("max_jsonl_bytes must be positive")
+        if max_jsonl_bytes < MIN_MAX_JSONL_RECORD_BYTES:
+            raise ValueError(
+                f"max_jsonl_bytes must be at least {MIN_MAX_JSONL_RECORD_BYTES}")
         self._input = input_stream
         self._output = output_stream
-        self._max_jsonl_bytes = max_jsonl_bytes
+        self._max_inbound_jsonl_bytes = max_jsonl_bytes
+        self._local_max_outbound_jsonl_bytes = max_jsonl_bytes
+        self._max_outbound_jsonl_bytes = max_jsonl_bytes
         self._next_request_id = 1
 
     def request(self, operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -72,7 +76,9 @@ class JsonlWorkerClient:
             )
 
     def hello(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self.request("hello", payload)
+        response_payload = self.request("hello", payload)
+        self._apply_hello_capabilities(response_payload)
+        return response_payload
 
     def dialogs(self) -> list[dict[str, Any]]:
         payload = self.request("dialogs.list")
@@ -118,10 +124,21 @@ class JsonlWorkerClient:
                         f"unexpected terminal operation {record.operation}",
                         fatal=True,
                     )
-                return ExportSummary(
-                    messages=int(record.payload.get("messages", 0)),
-                    truncated=bool(record.payload.get("truncated", False)),
-                )
+                messages = record.payload.get("messages")
+                truncated = record.payload.get("truncated")
+                if type(messages) is not int or messages < 0:
+                    raise WorkerClientError(
+                        "invalid_response",
+                        "messages.export response messages must be a non-negative integer",
+                        fatal=True,
+                    )
+                if type(truncated) is not bool:
+                    raise WorkerClientError(
+                        "invalid_response",
+                        "messages.export response truncated must be boolean",
+                        fatal=True,
+                    )
+                return ExportSummary(messages=messages, truncated=truncated)
             if record.message_type == "error":
                 raise self._worker_error(record)
             raise WorkerClientError("unexpected_record", "unexpected worker record")
@@ -138,15 +155,15 @@ class JsonlWorkerClient:
             operation=operation,
             payload=payload,
         )
-        self._output.write(encode_envelope(envelope, self._max_jsonl_bytes))
+        self._output.write(encode_envelope(envelope, self._max_outbound_jsonl_bytes))
         self._output.flush()
         return request_id
 
     def _read_record(self) -> Envelope:
-        raw = self._input.readline(self._max_jsonl_bytes + 1)
+        raw = self._input.readline(self._max_inbound_jsonl_bytes + 1)
         if raw == b"":
             raise WorkerClientError("worker_eof", "worker stdout closed", fatal=True)
-        if len(raw) > self._max_jsonl_bytes:
+        if len(raw) > self._max_inbound_jsonl_bytes:
             raise WorkerClientError(
                 "jsonl_record_too_large",
                 "inbound JSONL record is too large",
@@ -165,8 +182,48 @@ class JsonlWorkerClient:
 
     @staticmethod
     def _worker_error(record: Envelope) -> WorkerClientError:
+        code = record.payload.get("code")
+        message = record.payload.get("message")
+        fatal = record.payload.get("fatal")
+        if not isinstance(code, str) or not code:
+            return WorkerClientError(
+                "invalid_error_payload",
+                "worker error payload code must be a non-empty string",
+                fatal=True,
+            )
+        if not isinstance(message, str):
+            return WorkerClientError(
+                "invalid_error_payload",
+                "worker error payload message must be a string",
+                fatal=True,
+            )
+        if type(fatal) is not bool:
+            return WorkerClientError(
+                "invalid_error_payload",
+                "worker error payload fatal must be boolean",
+                fatal=True,
+            )
         return WorkerClientError(
-            str(record.payload.get("code", "worker_error")),
-            str(record.payload.get("message", "worker error")),
-            bool(record.payload.get("fatal", False)),
+            code,
+            message,
+            fatal,
+        )
+
+    def _apply_hello_capabilities(self, payload: dict[str, Any]) -> None:
+        capabilities = payload.get("capabilities")
+        if not isinstance(capabilities, dict):
+            raise WorkerClientError("invalid_response", "hello response must contain capabilities", fatal=True)
+        max_jsonl_record_bytes = capabilities.get("max_jsonl_record_bytes")
+        if (
+            type(max_jsonl_record_bytes) is not int
+            or max_jsonl_record_bytes < MIN_MAX_JSONL_RECORD_BYTES
+        ):
+            raise WorkerClientError(
+                "invalid_response",
+                "hello capabilities max_jsonl_record_bytes is below protocol minimum",
+                fatal=True,
+            )
+        self._max_outbound_jsonl_bytes = min(
+            self._local_max_outbound_jsonl_bytes,
+            max_jsonl_record_bytes,
         )

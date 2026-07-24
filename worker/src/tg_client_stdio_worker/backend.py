@@ -17,7 +17,7 @@ class Dialog:
 
 @dataclass(frozen=True)
 class ExportQuery:
-    chat: str = "-1001234567890"
+    chat: str
     topic_id: str = "0"
     from_date_ms: int | None = None
     to_date_ms: int | None = None
@@ -27,16 +27,18 @@ class ExportQuery:
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "ExportQuery":
-        chat = str(payload.get("chat", cls.chat))
-        topic_id = str(payload.get("topic_id", cls.topic_id))
-        from_date_ms = _optional_int(payload.get("from_date_ms"), "from_date_ms")
-        to_date_ms = _optional_int(payload.get("to_date_ms"), "to_date_ms")
-        limit = _optional_int(payload.get("limit"), "limit")
-        order = str(payload.get("order", cls.order))
-        include_media = bool(payload.get("include_media", cls.include_media))
+        chat = _stringish(payload.get("chat"), "chat")
+        topic_id = _stringish(payload.get("topic_id", cls.topic_id), "topic_id")
+        from_date_ms = _optional_u64(payload.get("from_date_ms"), "from_date_ms")
+        to_date_ms = _optional_u64(payload.get("to_date_ms"), "to_date_ms")
+        limit = _optional_positive_u32(payload.get("limit"), "limit")
+        order = _stringish(payload.get("order", cls.order), "order")
+        include_media = payload.get("include_media", cls.include_media)
 
-        if limit is not None and limit <= 0:
-            raise ValueError("limit must be positive")
+        if type(include_media) is not bool:
+            raise ValueError("include_media must be boolean")
+        if from_date_ms is not None and to_date_ms is not None and from_date_ms > to_date_ms:
+            raise ValueError("from_date_ms must be <= to_date_ms")
         if order not in {"oldest_first", "newest_first"}:
             raise ValueError("order must be oldest_first or newest_first")
 
@@ -100,37 +102,69 @@ class MockTelegramBackend:
         )
 
     def iter_export_messages(self, query: ExportQuery) -> Iterable[RawMessage]:
-        yield RawMessage(
-            chat_id=query.chat,
-            chat_title="Signals",
-            topic_id=query.topic_id,
-            message_id=1234,
-            date_ms=1784830000000,
-            edit_date_ms=0,
-            sender_id="777",
-            reply_to_message_id=0,
-            grouped_id="",
-            text="EURUSD BUY 5m",
-            media=[],
-        )
-        yield RawMessage(
-            chat_id=query.chat,
-            chat_title="Signals",
-            topic_id=query.topic_id,
-            message_id=1235,
-            date_ms=1784830300000,
-            edit_date_ms=0,
-            sender_id="777",
-            reply_to_message_id=1234,
-            grouped_id="",
-            text="WIN EURUSD",
-            media=[],
-        )
+        messages = [
+            RawMessage(
+                chat_id=query.chat,
+                chat_title="Signals",
+                topic_id=query.topic_id,
+                message_id=1234,
+                date_ms=1784830000000,
+                edit_date_ms=0,
+                sender_id="777",
+                reply_to_message_id=0,
+                grouped_id="",
+                text="EURUSD BUY 5m",
+                media=[],
+            ),
+            RawMessage(
+                chat_id=query.chat,
+                chat_title="Signals",
+                topic_id=query.topic_id,
+                message_id=1235,
+                date_ms=1784830300000,
+                edit_date_ms=0,
+                sender_id="777",
+                reply_to_message_id=1234,
+                grouped_id="",
+                text="WIN EURUSD",
+                media=[],
+            ),
+        ]
+        if query.order == "newest_first":
+            messages.reverse()
+
+        emitted = 0
+        for message in messages:
+            if query.from_date_ms is not None and message.date_ms < query.from_date_ms:
+                continue
+            if query.to_date_ms is not None and message.date_ms > query.to_date_ms:
+                continue
+            if query.limit is not None and emitted >= query.limit:
+                break
+            emitted += 1
+            yield message
 
 
-def _optional_int(value: Any, name: str) -> int | None:
+def _stringish(value: Any, name: str) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError(f"{name} must be a string or integer")
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"{name} must not be empty")
+    return text
+
+
+def _optional_u64(value: Any, name: str) -> int | None:
     if value is None:
         return None
-    if type(value) is not int:
-        raise ValueError(f"{name} must be an integer")
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _optional_positive_u32(value: Any, name: str) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or value <= 0 or value > 0xFFFF_FFFF:
+        raise ValueError(f"{name} must be a positive uint32")
     return value

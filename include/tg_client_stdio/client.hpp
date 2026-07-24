@@ -27,8 +27,9 @@ struct ClientConfig {
 inline std::string read_jsonl_record(
         std::istream& input,
         const std::size_t max_jsonl_record_bytes = kDefaultMaxJsonlRecordBytes) {
-    if (max_jsonl_record_bytes == 0) {
-        throw std::invalid_argument("max_jsonl_record_bytes must be positive");
+    if (max_jsonl_record_bytes < kMinMaxJsonlRecordBytes) {
+        throw std::invalid_argument(
+            "max_jsonl_record_bytes is below tg-client-stdio protocol minimum");
     }
 
     std::string line;
@@ -59,10 +60,16 @@ public:
         : m_input(&input),
           m_output(&output),
           m_config(config) {
-        if (m_config.max_jsonl_record_bytes == 0) {
-            throw std::invalid_argument("max_jsonl_record_bytes must be positive");
+        if (m_config.max_jsonl_record_bytes < kMinMaxJsonlRecordBytes) {
+            throw std::invalid_argument(
+                "max_jsonl_record_bytes is below tg-client-stdio protocol minimum");
         }
     }
+
+    Client(const Client&) = delete;
+    Client& operator=(const Client&) = delete;
+    Client(Client&&) = delete;
+    Client& operator=(Client&&) = delete;
 
     std::uint64_t next_request_id() {
         if (m_next_request_id == 0) {
