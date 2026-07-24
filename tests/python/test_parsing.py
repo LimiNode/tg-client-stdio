@@ -109,6 +109,165 @@ class RegexSignalParserTest(unittest.TestCase):
         self.assertIsNone(parser.parse_signal(raw("hello chat")))
         self.assertIsNone(parser.parse_outcome(raw("hello chat")))
 
+    def test_builds_parser_from_payload(self) -> None:
+        parser = RegexSignalParser.from_payload(
+            {
+                "signal_rules": [
+                    {
+                        "name": "pair-arrow-expiry",
+                        "pattern": (
+                            r"PAIR=(?P<symbol>[A-Z]{6})\s+"
+                            r"DIR=(?P<direction>CALL|PUT)\s+"
+                            r"EXP=(?P<expiry>\d+)(?P<expiry_unit>m)"
+                        ),
+                        "flags": ["ignorecase"],
+                    }
+                ],
+                "outcome_rules": [
+                    {
+                        "name": "result-tag",
+                        "pattern": r"RESULT=(?P<result>WIN|LOSS)",
+                    }
+                ],
+            }
+        )
+
+        signal = parser.parse_signal(raw("pair=EURUSD dir=CALL exp=15m"))
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.symbol, "EURUSD")
+        self.assertEqual(signal.direction, "BUY")
+        self.assertEqual(signal.expiry_seconds, 900)
+        self.assertEqual(signal.parser_rule, "pair-arrow-expiry")
+
+        outcome = parser.parse_outcome(raw("RESULT=LOSS EURUSD"))
+        self.assertIsNotNone(outcome)
+        assert outcome is not None
+        self.assertEqual(outcome.result, "LOSS")
+        self.assertEqual(outcome.parser_rule, "result-tag")
+
+    def test_rejects_invalid_parser_payload(self) -> None:
+        with self.assertRaises(ValueError):
+            RegexSignalParser.from_payload({})
+        with self.assertRaises(ValueError):
+            RegexSignalParser.from_payload({"signal_rules": [{"name": "bad", "pattern": "["}]})
+        with self.assertRaises(ValueError):
+            RegexSignalParser.from_payload(
+                {
+                    "signal_rules": [
+                        {
+                            "name": "bad-flag",
+                            "pattern": r"(?P<symbol>EURUSD)",
+                            "flags": ["unknown"],
+                        }
+                    ]
+                }
+            )
+        with self.assertRaises(ValueError):
+            RegexSignalParser.from_payload(
+                {
+                    "signal_rules": [
+                        {
+                            "name": "missing-direction",
+                            "pattern": r"(?P<symbol>EURUSD)\s+BUY",
+                        }
+                    ]
+                }
+            )
+        with self.assertRaises(ValueError):
+            RegexSignalParser.from_payload(
+                {
+                    "outcome_rules": [
+                        {
+                            "name": "missing-result",
+                            "pattern": r"WIN",
+                        }
+                    ]
+                }
+            )
+        with self.assertRaises(ValueError):
+            RegexSignalParser.from_payload(
+                {
+                    "outcome_rules": [
+                        {
+                            "name": "bad-integer-flags",
+                            "pattern": r"(?P<result>WIN)",
+                            "flags": 0x40000000,
+                        }
+                    ]
+                }
+            )
+
+    def test_optional_unmatched_signal_groups_do_not_crash(self) -> None:
+        parser = RegexSignalParser.from_payload(
+            {
+                "signal_rules": [
+                    {
+                        "name": "optional-symbol",
+                        "pattern": r"(?P<symbol>EURUSD)?\s*(?P<direction>BUY)",
+                    },
+                    {
+                        "name": "optional-direction",
+                        "pattern": r"(?P<symbol>EURUSD)\s*(?P<direction>BUY)?",
+                    },
+                ]
+            }
+        )
+
+        self.assertIsNone(parser.parse_signal(raw("BUY")))
+        self.assertIsNone(parser.parse_signal(raw("EURUSD")))
+
+    def test_optional_unmatched_outcome_group_does_not_crash(self) -> None:
+        parser = RegexSignalParser.from_payload(
+            {
+                "outcome_rules": [
+                    {
+                        "name": "optional-result",
+                        "pattern": r"(?P<result>WIN)?\s*EURUSD",
+                    }
+                ]
+            }
+        )
+
+        self.assertIsNone(parser.parse_outcome(raw("EURUSD")))
+
+    def test_invalid_custom_expiry_does_not_crash(self) -> None:
+        parser = RegexSignalParser.from_payload(
+            {
+                "signal_rules": [
+                    {
+                        "name": "bad-expiry",
+                        "pattern": (
+                            r"(?P<symbol>EURUSD)\s+"
+                            r"(?P<direction>BUY)\s+"
+                            r"(?P<expiry>[A-Z]+)"
+                        ),
+                    },
+                    {
+                        "name": "bad-expiry-unit",
+                        "pattern": (
+                            r"(?P<symbol>GBPUSD)\s+"
+                            r"(?P<direction>SELL)\s+"
+                            r"(?P<expiry>\d+)(?P<expiry_unit>weeks)"
+                        ),
+                    },
+                    {
+                        "name": "unit-without-expiry",
+                        "pattern": (
+                            r"(?P<symbol>USDJPY)\s+"
+                            r"(?P<direction>BUY)\s+"
+                            r"(?P<expiry>\d+)?"
+                            r"(?P<expiry_unit>weeks)"
+                        ),
+                    },
+                ]
+            }
+        )
+
+        self.assertIsNone(parser.parse_signal(raw("EURUSD BUY soon")))
+        self.assertIsNone(parser.parse_signal(raw("GBPUSD SELL 2weeks")))
+        self.assertIsNone(parser.parse_signal(raw("USDJPY BUY weeks")))
+
 
 if __name__ == "__main__":
     unittest.main()
