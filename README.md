@@ -77,6 +77,22 @@ summary = client.stream_messages({"chat": "-1001234567890"}, messages.append)
 Process spawning and restart policy intentionally stay outside this helper so a
 supervisor can decide how sessions, proxies and credentials are isolated.
 
+## Regex Parser
+
+The first parser layer is regex-based and intentionally small. It can extract
+basic executable signals and simple outcome messages from raw Telegram messages:
+
+```python
+from tg_client_stdio_worker.parsing import RegexSignalParser
+
+parser = RegexSignalParser.default()
+signal = parser.parse_signal(raw_message)
+outcome = parser.parse_outcome(raw_message)
+```
+
+The parser returns neutral Python dataclasses. Mapping them to broker-specific
+trade DTOs is a host-application concern.
+
 ## C++ Helper
 
 The first C++ layer is intentionally small: it builds protocol envelopes and
