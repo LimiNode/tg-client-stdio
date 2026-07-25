@@ -99,6 +99,19 @@ signal = parser.parse_signal(raw_message)
 outcome = parser.parse_outcome(raw_message)
 ```
 
+Custom rule sets can be loaded from JSON-compatible dictionaries:
+
+```python
+parser = RegexSignalParser.from_payload({
+    "signal_rules": [
+        {
+            "name": "pair-direction-expiry",
+            "pattern": r"PAIR=(?P<symbol>[A-Z]{6}) DIR=(?P<direction>CALL|PUT) EXP=(?P<expiry>\\d+)m"
+        }
+    ]
+})
+```
+
 The parser returns neutral Python dataclasses. Mapping them to broker-specific
 trade DTOs is a host-application concern.
 
