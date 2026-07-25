@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, BinaryIO, Iterable, TextIO
+from dataclasses import replace
+from typing import Any, BinaryIO, TextIO
 
 from . import __version__
+from .backend import ExportQuery, MockTelegramBackend, TelegramBackend
 from .protocol import (
     DEFAULT_MAX_JSONL_RECORD_BYTES,
     Envelope,
@@ -30,55 +32,13 @@ class ServerConfig:
                 f"max_jsonl_bytes must be at least {MIN_MAX_JSONL_RECORD_BYTES}")
 
 
-class MockTelegramBackend:
-    """Deterministic backend used by protocol tests and early host integration."""
-
-    def dialogs(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "chat_id": "-1001234567890",
-                "title": "Signals",
-                "username": "signals",
-                "kind": "channel",
-            }
-        ]
-
-    def iter_export_messages(self, query: dict[str, Any]) -> Iterable[dict[str, Any]]:
-        chat = str(query.get("chat", "-1001234567890"))
-        yield {
-            "chat_id": chat,
-            "chat_title": "Signals",
-            "topic_id": str(query.get("topic_id", "0")),
-            "message_id": 1234,
-            "date_ms": 1784830000000,
-            "edit_date_ms": 0,
-            "sender_id": "777",
-            "reply_to_message_id": 0,
-            "grouped_id": "",
-            "text": "EURUSD BUY 5m",
-            "media": [],
-        }
-        yield {
-            "chat_id": chat,
-            "chat_title": "Signals",
-            "topic_id": str(query.get("topic_id", "0")),
-            "message_id": 1235,
-            "date_ms": 1784830300000,
-            "edit_date_ms": 0,
-            "sender_id": "777",
-            "reply_to_message_id": 1234,
-            "grouped_id": "",
-            "text": "WIN EURUSD",
-            "media": [],
-        }
-
 class JsonlWorkerServer:
     def __init__(
         self,
         input_stream: BinaryIO,
         output_stream: BinaryIO,
         error_stream: TextIO,
-        backend: MockTelegramBackend,
+        backend: TelegramBackend,
         config: ServerConfig | None = None,
     ) -> None:
         self._input = input_stream
@@ -150,16 +110,29 @@ class JsonlWorkerServer:
             return
 
         if request.operation == "dialogs.list":
-            self._write(response(request, {"dialogs": self._backend.dialogs()}))
+            dialogs = [dialog.to_payload() for dialog in self._backend.dialogs()]
+            self._write(response(request, {"dialogs": dialogs}))
             return
 
         if request.operation == "messages.export":
+            try:
+                query = ExportQuery.from_payload(request.payload)
+            except ValueError as exc:
+                self._write(error(request, "invalid_export_query", str(exc)))
+                return
             self._write(event(request.request_id, "export.started", {}))
             count = 0
-            for message in self._backend.iter_export_messages(request.payload):
-                self._write(event(request.request_id, "export.message", {"message": message}))
+            truncated = False
+            backend_query = query
+            if query.limit is not None:
+                backend_query = replace(query, limit=query.limit + 1)
+            for message in self._backend.iter_export_messages(backend_query):
+                if query.limit is not None and count >= query.limit:
+                    truncated = True
+                    break
+                self._write(event(request.request_id, "export.message", {"message": message.to_payload()}))
                 count += 1
-            self._write(response(request, {"messages": count, "truncated": False}))
+            self._write(response(request, {"messages": count, "truncated": truncated}))
             return
 
         if request.operation == "shutdown":

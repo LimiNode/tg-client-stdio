@@ -7,6 +7,7 @@ import unittest
 from collections.abc import Iterable
 from typing import Any
 
+from tg_client_stdio_worker.backend import ExportQuery, MockTelegramBackend, RawMessage
 from tg_client_stdio_worker.cli import build_parser
 from tg_client_stdio_worker.protocol import (
     MIN_MAX_JSONL_RECORD_BYTES,
@@ -15,7 +16,7 @@ from tg_client_stdio_worker.protocol import (
     decode_envelope,
     encode_envelope,
 )
-from tg_client_stdio_worker.server import JsonlWorkerServer, MockTelegramBackend, ServerConfig
+from tg_client_stdio_worker.server import JsonlWorkerServer, ServerConfig
 
 
 def request(request_id: int, operation: str, payload: dict | None = None) -> bytes:
@@ -77,6 +78,124 @@ class ProtocolTest(unittest.TestCase):
         )
         self.assertEqual(export_records[-1]["message_type"], "response")
         self.assertEqual(export_records[-1]["payload"]["messages"], 2)
+        self.assertEqual(
+            export_records[1]["payload"]["message"]["message_identity"],
+            "telegram:-10042:0:1234",
+        )
+        self.assertEqual(
+            export_records[1]["payload"]["message"]["revision_identity"],
+            "telegram:-10042:0:1234:0",
+        )
+
+    def test_rejects_invalid_export_query(self) -> None:
+        input_stream = io.BytesIO(request(3, "messages.export", {"limit": 0}))
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=input_stream,
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+        )
+
+        self.assertEqual(server.run(), 0)
+        record = json.loads(output_stream.getvalue().decode("utf-8"))
+        self.assertEqual(record["message_type"], "error")
+        self.assertEqual(record["operation"], "messages.export")
+        self.assertEqual(record["payload"]["code"], "invalid_export_query")
+
+    def test_export_query_filters_by_date_limit_and_order(self) -> None:
+        input_stream = io.BytesIO(
+            request(
+                3,
+                "messages.export",
+                {
+                    "chat": "-10042",
+                    "from_date_ms": 1784830000000,
+                    "order": "newest_first",
+                    "limit": 1,
+                },
+            )
+        )
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=input_stream,
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+        )
+
+        self.assertEqual(server.run(), 0)
+        records = [
+            json.loads(line)
+            for line in output_stream.getvalue().decode("utf-8").splitlines()
+            if line
+        ]
+        message_records = [item for item in records if item["operation"] == "export.message"]
+        self.assertEqual(len(message_records), 1)
+        self.assertEqual(message_records[0]["payload"]["message"]["message_id"], 1235)
+        self.assertEqual(records[-1]["operation"], "messages.export")
+        self.assertEqual(records[-1]["payload"]["messages"], 1)
+        self.assertTrue(records[-1]["payload"]["truncated"])
+
+    def test_export_query_reports_not_truncated_when_limit_exhausts_results(self) -> None:
+        input_stream = io.BytesIO(
+            request(
+                3,
+                "messages.export",
+                {
+                    "chat": "-10042",
+                    "from_date_ms": 1784830200000,
+                    "limit": 1,
+                },
+            )
+        )
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=input_stream,
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+        )
+
+        self.assertEqual(server.run(), 0)
+        records = [
+            json.loads(line)
+            for line in output_stream.getvalue().decode("utf-8").splitlines()
+            if line
+        ]
+        self.assertEqual(records[-1]["payload"]["messages"], 1)
+        self.assertFalse(records[-1]["payload"]["truncated"])
+
+    def test_export_query_rejects_invalid_date_range(self) -> None:
+        input_stream = io.BytesIO(
+            request(
+                3,
+                "messages.export",
+                {
+                    "chat": "-10042",
+                    "from_date_ms": 1784830300000,
+                    "to_date_ms": 1784830200000,
+                },
+            )
+        )
+        output_stream = io.BytesIO()
+
+        server = JsonlWorkerServer(
+            input_stream=input_stream,
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=MockTelegramBackend(),
+        )
+
+        self.assertEqual(server.run(), 0)
+        record = json.loads(output_stream.getvalue().decode("utf-8"))
+        self.assertEqual(record["message_type"], "error")
+        self.assertEqual(record["request_id"], 3)
+        self.assertEqual(record["operation"], "messages.export")
+        self.assertEqual(record["payload"]["code"], "invalid_export_query")
 
     def test_rejects_oversized_inbound_record(self) -> None:
         input_stream = io.BytesIO(request(1, "hello", {"padding": "x" * 512}))
@@ -300,17 +419,19 @@ class ProtocolTest(unittest.TestCase):
 
     def test_oversized_export_event_returns_terminal_error(self) -> None:
         class LargeMessageBackend(MockTelegramBackend):
-            def iter_export_messages(self, query: dict[str, Any]) -> Iterable[dict[str, Any]]:
-                yield {
-                    "chat_id": "-100",
-                    "message_id": 1,
-                    "date_ms": 1,
-                    "text": "x" * 512,
-                }
+            def iter_export_messages(self, query: ExportQuery) -> Iterable[RawMessage]:
+                yield RawMessage(
+                    chat_id="-100",
+                    chat_title="Signals",
+                    topic_id="0",
+                    message_id=1,
+                    date_ms=1,
+                    text="x" * 512,
+                )
 
         output_stream = io.BytesIO()
         server = JsonlWorkerServer(
-            input_stream=io.BytesIO(request(44, "messages.export")),
+            input_stream=io.BytesIO(request(44, "messages.export", {"chat": "-100"})),
             output_stream=output_stream,
             error_stream=io.StringIO(),
             backend=LargeMessageBackend(),
