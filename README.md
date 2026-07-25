@@ -77,6 +77,15 @@ summary = client.stream_messages({"chat": "-1001234567890"}, messages.append)
 Process spawning and restart policy intentionally stay outside this helper so a
 supervisor can decide how sessions, proxies and credentials are isolated.
 
+For simple tools and tests, `WorkerProcess` can own one worker subprocess:
+
+```python
+from tg_client_stdio_worker.process import WorkerProcess
+
+with WorkerProcess() as client:
+    dialogs = client.dialogs()
+```
+
 ## Regex Parser
 
 The first parser layer is regex-based and intentionally small. It can extract
