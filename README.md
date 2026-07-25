@@ -13,12 +13,12 @@ Early scaffold. The repository currently contains:
 
 - protocol v1 design and envelope rules;
 - a Python mock worker that speaks the JSONL protocol;
+- an optional Telethon-backed worker backend for pre-authorized sessions;
 - C++17 header-only envelope helpers;
 - tests for the mock worker and C++ protocol helper.
 
-The real Telethon backend is planned next. The mock backend exists so host
-applications can build and test the stdio contract before Telegram
-authorization is wired in.
+The mock backend exists so host applications can build and test the stdio
+contract before Telegram authorization is wired in.
 
 ## Repository Layout
 
@@ -51,6 +51,16 @@ Install the worker package, then run a local mock worker:
 python -m pip install -e .
 tg-client-stdio-worker --mock
 ```
+
+The Telethon backend is optional and requires a pre-authorized session:
+
+```powershell
+python -m pip install -e ".[telegram]"
+tg-client-stdio-worker --backend telethon --api-id 123 --api-hash ... --session ./session
+```
+
+Interactive Telegram login is intentionally outside JSONL stdio; stdin is
+reserved for protocol records.
 
 Example request:
 
