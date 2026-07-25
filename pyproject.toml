@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tg-client-stdio-worker"
+version = "0.1.0"
+description = "Telegram user-client worker over JSONL stdio"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+telegram = [
+  "telethon>=1.37,<2",
+  "python-dotenv>=1,<2",
+]
+dev = []
+
+[project.scripts]
+tg-client-stdio-worker = "tg_client_stdio_worker.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["worker/src"]
+
+[tool.setuptools.package-dir]
+"" = "worker/src"
