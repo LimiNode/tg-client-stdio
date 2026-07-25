@@ -75,10 +75,17 @@ class RawMessage:
     def revision_identity(self) -> str:
         return f"{self.message_identity}:{self.edit_date_ms or 0}"
 
+    @property
+    def reply_to_message_identity(self) -> str:
+        if self.reply_to_message_id <= 0:
+            return ""
+        return f"telegram:{self.chat_id}:{self.topic_id or '0'}:{self.reply_to_message_id}"
+
     def to_payload(self) -> dict[str, Any]:
         data = asdict(self)
         data["message_identity"] = self.message_identity
         data["revision_identity"] = self.revision_identity
+        data["reply_to_message_identity"] = self.reply_to_message_identity
         return data
 
 
