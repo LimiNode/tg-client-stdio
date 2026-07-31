@@ -35,6 +35,20 @@ class ParsedOutcome:
 
 
 @dataclass(frozen=True)
+class ParseDiagnostic:
+    code: str
+    message: str
+    parser_rule: str = ""
+
+
+@dataclass
+class ParsedMessage:
+    signals: list[ParsedSignal] = field(default_factory=list)
+    outcomes: list[ParsedOutcome] = field(default_factory=list)
+    diagnostics: list[ParseDiagnostic] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class RegexRule:
     name: str
     pattern: str
@@ -113,50 +127,77 @@ class RegexSignalParser:
         return cls(signal_rules=signal_rules, outcome_rules=outcome_rules)
 
     def parse_signal(self, message: RawMessage) -> ParsedSignal | None:
-        for rule in self.signal_rules:
-            match = rule.compile().search(message.text)
-            if not match:
-                continue
-            symbol = _normalize_symbol(_match_text(match, "symbol"))
-            direction = _normalize_direction(_match_text(match, "direction"))
-            expiry_ok, expiry = _parse_expiry_seconds(
-                match.groupdict().get("expiry"),
-                match.groupdict().get("expiry_unit"),
-            )
-            if not symbol or not direction or not expiry_ok:
-                continue
-            return ParsedSignal(
-                symbol=symbol,
-                direction=direction,
-                expiry_seconds=expiry,
-                name=message.chat_title,
-                source_message_identity=message.message_identity,
-                source_revision_identity=message.revision_identity,
-                parser_rule=rule.name,
-            )
-        return None
+        parsed = self.parse_message(message)
+        return parsed.signals[0] if parsed.signals else None
 
     def parse_outcome(self, message: RawMessage) -> ParsedOutcome | None:
+        parsed = self.parse_message(message)
+        return parsed.outcomes[0] if parsed.outcomes else None
+
+    def parse_message(self, message: RawMessage) -> ParsedMessage:
+        parsed = ParsedMessage()
+        signal_matches: list[tuple[int, int, tuple[str, str, int | None]]] = []
+        outcome_matches: list[tuple[int, int, tuple[str, str]]] = []
+
+        for rule in self.signal_rules:
+            for match in rule.compile().finditer(message.text):
+                symbol = _normalize_symbol(_match_text(match, "symbol"))
+                direction = _normalize_direction(_match_text(match, "direction"))
+                expiry_ok, expiry = _parse_expiry_seconds(
+                    match.groupdict().get("expiry"),
+                    match.groupdict().get("expiry_unit"),
+                )
+                if not symbol or not direction or not expiry_ok:
+                    parsed.diagnostics.append(ParseDiagnostic(
+                        code="signal_rule_miss",
+                        message="signal match did not contain valid fields",
+                        parser_rule=rule.name,
+                    ))
+                    continue
+                signature = (symbol, direction, expiry)
+                start, end = match.span()
+                if _is_overlapping_duplicate(signal_matches, start, end, signature):
+                    continue
+                signal_matches.append((start, end, signature))
+                parsed.signals.append(ParsedSignal(
+                    symbol=symbol,
+                    direction=direction,
+                    expiry_seconds=expiry,
+                    name=message.chat_title,
+                    source_message_identity=message.message_identity,
+                    source_revision_identity=message.revision_identity,
+                    parser_rule=rule.name,
+                ))
+
         for rule in self.outcome_rules:
-            match = rule.compile().search(message.text)
-            if not match:
-                continue
-            result = _normalize_result(_match_text(match, "result"))
-            if not result:
-                continue
-            symbol = _normalize_symbol(match.groupdict().get("symbol") or "")
-            if not symbol:
-                symbol = _find_symbol(message.text)
-            return ParsedOutcome(
-                result=result,
-                symbol=symbol,
-                reply_to_message_id=message.reply_to_message_id,
-                reply_to_message_identity=message.reply_to_message_identity,
-                source_message_identity=message.message_identity,
-                source_revision_identity=message.revision_identity,
-                parser_rule=rule.name,
-            )
-        return None
+            for match in rule.compile().finditer(message.text):
+                result = _normalize_result(_match_text(match, "result"))
+                if not result:
+                    parsed.diagnostics.append(ParseDiagnostic(
+                        code="outcome_rule_miss",
+                        message="outcome match did not contain a valid result",
+                        parser_rule=rule.name,
+                    ))
+                    continue
+                symbol = _normalize_symbol(match.groupdict().get("symbol") or "")
+                if not symbol:
+                    symbol = _find_symbol(message.text)
+                signature = (result, symbol)
+                start, end = match.span()
+                if _is_overlapping_duplicate(outcome_matches, start, end, signature):
+                    continue
+                outcome_matches.append((start, end, signature))
+                parsed.outcomes.append(ParsedOutcome(
+                    result=result,
+                    symbol=symbol,
+                    reply_to_message_id=message.reply_to_message_id,
+                    reply_to_message_identity=message.reply_to_message_identity,
+                    source_message_identity=message.message_identity,
+                    source_revision_identity=message.revision_identity,
+                    parser_rule=rule.name,
+                ))
+
+        return parsed
 
 
 def _match_text(match: re.Match[str], group_name: str) -> str:
@@ -164,6 +205,19 @@ def _match_text(match: re.Match[str], group_name: str) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip()
+
+
+def _is_overlapping_duplicate(
+        matches: list[tuple[int, int, tuple[Any, ...]]],
+        start: int,
+        end: int,
+        signature: tuple[Any, ...]) -> bool:
+    return any(
+        existing_signature == signature
+        and start < existing_end
+        and existing_start < end
+        for existing_start, existing_end, existing_signature in matches
+    )
 
 
 def _normalize_symbol(value: str) -> str:

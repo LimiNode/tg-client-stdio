@@ -87,12 +87,14 @@ summary = client.stream_messages({"chat": "-1001234567890"}, messages.append)
 Process spawning and restart policy intentionally stay outside this helper so a
 supervisor can decide how sessions, proxies and credentials are isolated.
 
-For simple tools and tests, `WorkerProcess` can own one worker subprocess:
+For simple tools and tests, `WorkerProcess` can own one worker subprocess. The
+backend must be selected explicitly; it never silently falls back to the mock
+backend:
 
 ```python
-from tg_client_stdio_worker.process import WorkerProcess
+from tg_client_stdio_worker.process import WorkerProcess, WorkerProcessConfig
 
-with WorkerProcess() as client:
+with WorkerProcess(WorkerProcessConfig(args=["--mock"])) as client:
     dialogs = client.dialogs()
 ```
 
@@ -105,9 +107,14 @@ basic executable signals and simple outcome messages from raw Telegram messages:
 from tg_client_stdio_worker.parsing import RegexSignalParser
 
 parser = RegexSignalParser.default()
-signal = parser.parse_signal(raw_message)
-outcome = parser.parse_outcome(raw_message)
+parsed = parser.parse_message(raw_message)
+signals = parsed.signals
+outcomes = parsed.outcomes
 ```
+
+`parse_message()` reports every accepted non-overlapping signal and outcome,
+plus parser diagnostics. The older `parse_signal()` and `parse_outcome()`
+methods remain convenience wrappers that return the first accepted result.
 
 Custom rule sets can be loaded from JSON-compatible dictionaries:
 

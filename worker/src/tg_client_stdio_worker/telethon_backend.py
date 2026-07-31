@@ -59,7 +59,6 @@ class TelethonBackend:
             )
 
         reply_to = _topic_id_to_reply_to(query.topic_id)
-        canonical_topic_id = str(reply_to or 0)
         reverse = query.order == "oldest_first"
         kwargs: dict[str, Any] = {
             "limit": None if query.from_date_ms is not None or query.to_date_ms is not None else query.limit,
@@ -74,10 +73,20 @@ class TelethonBackend:
         emitted = 0
         try:
             client = self._authorized_client()
-            entity = client.get_entity(query.chat)
+            chat_ref = _telethon_chat_ref(query.chat)
+            entity = client.get_entity(chat_ref)
+            input_entity = client.get_input_entity(entity)
             canonical_chat_id = _canonical_peer_id(entity)
             chat_title = _entity_title(entity, query.chat)
-            for message in client.iter_messages(query.chat, **kwargs):
+            messages = client.iter_messages(input_entity, **kwargs)
+            if reply_to is not None:
+                root_message = client.get_messages(input_entity, ids=reply_to)
+                messages = _merge_topic_root(
+                    root_message,
+                    messages,
+                    oldest_first=reverse,
+                )
+            for message in messages:
                 date_ms = _datetime_to_ms(message.date)
                 if _past_requested_range(query, date_ms):
                     break
@@ -91,7 +100,7 @@ class TelethonBackend:
                 yield RawMessage(
                     chat_id=canonical_chat_id,
                     chat_title=chat_title,
-                    topic_id=canonical_topic_id,
+                    topic_id=_message_topic_id(message, reply_to),
                     message_id=int(message.id),
                     date_ms=date_ms,
                     edit_date_ms=_datetime_to_ms(getattr(message, "edit_date", None)),
@@ -162,6 +171,53 @@ def _topic_id_to_reply_to(topic_id: str) -> int | None:
         raise BackendError("invalid_export_query", "topic_id must be a decimal integer")
     numeric = int(topic_id)
     return numeric if numeric > 0 else None
+
+
+def _telethon_chat_ref(value: str) -> str | int:
+    if value.lstrip("-").isdecimal():
+        return int(value)
+    return value
+
+
+def _merge_topic_root(
+        root_message: Any,
+        replies: Iterable[Any],
+        *,
+        oldest_first: bool) -> Iterable[Any]:
+    root_id = getattr(root_message, "id", None) if root_message is not None else None
+
+    def ordered() -> Iterable[Any]:
+        if oldest_first and root_message is not None:
+            yield root_message
+        for message in replies:
+            if root_id is not None and getattr(message, "id", None) == root_id:
+                continue
+            yield message
+        if not oldest_first and root_message is not None:
+            yield root_message
+
+    return ordered()
+
+
+def _message_topic_id(message: Any, topic_root_id: int | None = None) -> str:
+    if topic_root_id is not None and getattr(message, "id", None) == topic_root_id:
+        return str(topic_root_id)
+
+    reply_header = getattr(message, "reply_to", None)
+    top_id = getattr(reply_header, "reply_to_top_id", None)
+    if top_id is None:
+        top_id = getattr(message, "reply_to_top_id", None)
+    if isinstance(top_id, int) and top_id > 0:
+        return str(top_id)
+
+    # Forum roots expose a replies header even though they do not reply to
+    # another message. Its own message ID is the stable topic identity.
+    replies = getattr(message, "replies", None)
+    if replies is not None and getattr(replies, "replies", None) is not None:
+        message_id = getattr(message, "id", None)
+        if isinstance(message_id, int) and message_id > 0:
+            return str(message_id)
+    return "0"
 
 
 def _offset_date(query: ExportQuery) -> datetime | None:

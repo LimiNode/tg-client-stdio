@@ -9,6 +9,10 @@ from tg_client_stdio_worker.process import WorkerProcess, WorkerProcessConfig
 
 
 class WorkerProcessTest(unittest.TestCase):
+    def test_default_worker_process_requires_explicit_backend(self) -> None:
+        with self.assertRaises(ValueError):
+            WorkerProcess()
+
     def test_starts_mock_worker_and_streams_export(self) -> None:
         worker = WorkerProcess(
             WorkerProcessConfig(
@@ -25,6 +29,7 @@ class WorkerProcessTest(unittest.TestCase):
             summary = client.stream_messages({"chat": "-10042"}, messages.append)
 
             self.assertEqual(hello["worker_name"], "tg-client-stdio-worker")
+            self.assertEqual(hello["backend"], "mock")
             self.assertEqual(dialogs[0]["chat_id"], "-1001234567890")
             self.assertEqual(summary.messages, 2)
             self.assertEqual(messages[0]["message_identity"], "telegram:-10042:0:1234")

@@ -84,10 +84,11 @@ Worker response:
   "message_type": "response",
   "request_id": 1,
   "operation": "hello",
-  "payload": {
-    "worker_name": "tg-client-stdio-worker",
-    "worker_version": "0.1.0",
-    "capabilities": {
+    "payload": {
+      "worker_name": "tg-client-stdio-worker",
+      "worker_version": "0.1.0",
+      "backend": "telethon",
+      "capabilities": {
       "dialogs_list": true,
       "messages_export": true,
       "messages_listen": false,
@@ -136,6 +137,11 @@ Request payload:
   "include_media": false
 }
 ```
+
+`topic_id` is a filter, not an identity override. Exported messages derive
+their topic identity from Telegram reply metadata. When a topic is requested,
+the topic root message is included and merged with its replies according to
+the requested date range, order, and limit.
 
 Streaming lifecycle:
 
@@ -203,6 +209,10 @@ revision_identity = <message_identity>:<edit_date_ms-or-0>
 Telegram exposes a new edit timestamp. The worker only reports Telegram message
 identity and revision identity; application-specific execution, dedupe and
 correction policy belongs to the host application.
+
+The topic component is derived from the message itself, so exporting a message
+from the whole chat and exporting the same message through a topic filter yields
+the same identity.
 
 `reply_to_message_id` should be preserved when Telegram exposes it because
 result messages are often replies to the original signal. `grouped_id` should be

@@ -58,6 +58,16 @@ class FakeDialog:
 
 
 @dataclass
+class FakeReplyHeader:
+    reply_to_top_id: int
+
+
+@dataclass
+class FakeReplies:
+    replies: int = 1
+
+
+@dataclass
 class FakeMessage:
     id: int
     date: datetime
@@ -66,6 +76,8 @@ class FakeMessage:
     sender_id: int = 777
     reply_to_msg_id: int = 0
     grouped_id: str = ""
+    reply_to: FakeReplyHeader | None = None
+    replies: FakeReplies | None = None
 
 
 class FakeTelethonClient:
@@ -76,17 +88,21 @@ class FakeTelethonClient:
             *args: Any,
             authorized: bool = True,
             connect_raises: bool = False,
-            entity: Any | None = None,
-            messages: list[FakeMessage] | None = None,
-            **kwargs: Any) -> None:
+        entity: Any | None = None,
+        messages: list[FakeMessage] | None = None,
+        topic_root: FakeMessage | None = None,
+        **kwargs: Any) -> None:
         self.authorized = authorized
         self.connect_raises = connect_raises
         self.entity = entity or FakeEntity()
         self.connected = False
         self.disconnected = False
         self.messages = messages or []
+        self.topic_root = topic_root
         self.consumed_messages = 0
         self.iter_messages_kwargs: dict[str, Any] = {}
+        self.last_entity_ref: Any | None = None
+        self.last_iter_messages_chat: Any | None = None
         FakeTelethonClient.last_instance = self
 
     def connect(self) -> None:
@@ -103,13 +119,23 @@ class FakeTelethonClient:
     def iter_dialogs(self) -> list[FakeDialog]:
         return [FakeDialog(id=-10042, name="Signals", entity=self.entity)]
 
-    def get_entity(self, chat: str) -> FakeEntity:
+    def get_entity(self, chat: str | int) -> FakeEntity:
+        self.last_entity_ref = chat
         entity = self.entity
         if hasattr(entity, "title"):
             entity.title = f"title:{chat}"
         return entity
 
-    def iter_messages(self, chat: str, **kwargs: Any) -> Iterable[FakeMessage]:
+    def get_input_entity(self, entity: Any) -> Any:
+        return entity
+
+    def get_messages(self, chat: Any, ids: int) -> FakeMessage | None:
+        if self.topic_root is not None and self.topic_root.id == ids:
+            return self.topic_root
+        return None
+
+    def iter_messages(self, chat: Any, **kwargs: Any) -> Iterable[FakeMessage]:
+        self.last_iter_messages_chat = chat
         self.iter_messages_kwargs = kwargs
         offset_date = kwargs.get("offset_date")
         reverse = bool(kwargs.get("reverse", False))
@@ -176,6 +202,23 @@ class TelethonBackendCliTest(unittest.TestCase):
         self.assertEqual(messages[0].chat_id, "-10042")
         self.assertEqual(messages[0].message_id, 10)
 
+    def test_numeric_chat_id_is_passed_to_telethon_as_int(self) -> None:
+        backend = TelethonBackend(
+            TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
+            telegram_client_factory=lambda *args, **kwargs: FakeTelethonClient(
+                *args,
+                messages=[FakeMessage(id=10, date=_dt(1784830000000))],
+                **kwargs,
+            ),
+        )
+
+        list(backend.iter_export_messages(ExportQuery(chat="-10042")))
+
+        client = FakeTelethonClient.last_instance
+        assert client is not None
+        self.assertEqual(client.last_entity_ref, -10042)
+        self.assertEqual(client.last_iter_messages_chat, client.entity)
+
     def test_export_identity_is_independent_of_query_form(self) -> None:
         messages = [FakeMessage(id=10, date=_dt(1784830000000))]
         backend = TelethonBackend(
@@ -196,19 +239,67 @@ class TelethonBackendCliTest(unittest.TestCase):
         self.assertEqual(by_numeric_id[0].message_identity, by_username[0].message_identity)
 
     def test_export_normalizes_topic_id_identity(self) -> None:
+        root = FakeMessage(
+            id=42,
+            date=_dt(1784829000000),
+            replies=FakeReplies(),
+        )
+        reply = FakeMessage(
+            id=10,
+            date=_dt(1784830000000),
+            reply_to=FakeReplyHeader(reply_to_top_id=42),
+        )
         backend = TelethonBackend(
             TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
             telegram_client_factory=lambda *args, **kwargs: FakeTelethonClient(
                 *args,
-                messages=[FakeMessage(id=10, date=_dt(1784830000000))],
+                messages=[reply],
+                topic_root=root,
                 **kwargs,
             ),
         )
 
         messages = list(backend.iter_export_messages(ExportQuery(chat="@signals", topic_id="042")))
 
-        self.assertEqual(messages[0].topic_id, "42")
-        self.assertEqual(messages[0].message_identity, "telegram:-10042:42:10")
+        self.assertEqual([message.message_id for message in messages], [42, 10])
+        self.assertEqual([message.topic_id for message in messages], ["42", "42"])
+        self.assertEqual(
+            [message.message_identity for message in messages],
+            ["telegram:-10042:42:42", "telegram:-10042:42:10"],
+        )
+
+    def test_topic_identity_is_stable_between_whole_chat_and_topic_export(self) -> None:
+        root = FakeMessage(
+            id=42,
+            date=_dt(1784829000000),
+            replies=FakeReplies(),
+        )
+        reply = FakeMessage(
+            id=10,
+            date=_dt(1784830000000),
+            reply_to=FakeReplyHeader(reply_to_top_id=42),
+        )
+
+        def factory(*args: Any, **kwargs: Any) -> FakeTelethonClient:
+            return FakeTelethonClient(
+                *args,
+                messages=[root, reply],
+                topic_root=root,
+                **kwargs,
+            )
+
+        backend = TelethonBackend(
+            TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
+            telegram_client_factory=factory,
+        )
+        whole_chat = list(backend.iter_export_messages(ExportQuery(chat="-10042")))
+        topic = list(backend.iter_export_messages(
+            ExportQuery(chat="-10042", topic_id="42")))
+
+        whole_by_id = {message.message_id: message.message_identity for message in whole_chat}
+        topic_by_id = {message.message_id: message.message_identity for message in topic}
+        self.assertEqual(whole_by_id[42], topic_by_id[42])
+        self.assertEqual(whole_by_id[10], topic_by_id[10])
 
     def test_zero_padded_topic_zero_does_not_set_reply_to(self) -> None:
         backend = TelethonBackend(

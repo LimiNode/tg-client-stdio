@@ -63,6 +63,25 @@ class JsonlWorkerClientTest(unittest.TestCase):
         self.assertEqual(summary.messages, 2)
         self.assertFalse(summary.truncated)
 
+    def test_callback_failure_poison_sessions_and_rejects_next_request(self) -> None:
+        input_stream = io.BytesIO(
+            record("event", 1, "export.started", {}) +
+            record("event", 1, "export.message", {"message": {"message_id": 10}}) +
+            record("response", 1, "messages.export", {"messages": 1, "truncated": False})
+        )
+        output_stream = io.BytesIO()
+        client = JsonlWorkerClient(input_stream, output_stream)
+
+        with self.assertRaises(WorkerClientError) as caught:
+            client.stream_messages({"chat": "-100"}, lambda message: (_ for _ in ()).throw(
+                RuntimeError("storage failed")))
+
+        self.assertEqual(caught.exception.code, "callback_failed")
+        self.assertTrue(caught.exception.fatal)
+        with self.assertRaises(WorkerClientError) as next_caught:
+            client.dialogs()
+        self.assertEqual(next_caught.exception.code, "callback_failed")
+
     def test_rejects_invalid_export_summary_types(self) -> None:
         input_stream = io.BytesIO(
             record("response", 1, "messages.export", {"messages": 2, "truncated": "false"})
