@@ -76,6 +76,12 @@ class TelethonBackend:
             chat_ref = _telethon_chat_ref(query.chat)
             entity = client.get_entity(chat_ref)
             input_entity = client.get_input_entity(entity)
+            is_forum = bool(getattr(entity, "forum", False))
+            if reply_to is not None and not is_forum:
+                raise BackendError(
+                    "invalid_export_query",
+                    "topic_id requires a Telegram forum entity",
+                )
             canonical_chat_id = _canonical_peer_id(entity)
             chat_title = _entity_title(entity, query.chat)
             messages = client.iter_messages(input_entity, **kwargs)
@@ -100,7 +106,7 @@ class TelethonBackend:
                 yield RawMessage(
                     chat_id=canonical_chat_id,
                     chat_title=chat_title,
-                    topic_id=_message_topic_id(message, reply_to),
+                    topic_id=_message_topic_id(message, reply_to, is_forum=is_forum),
                     message_id=int(message.id),
                     date_ms=date_ms,
                     edit_date_ms=_datetime_to_ms(getattr(message, "edit_date", None)),
@@ -199,9 +205,16 @@ def _merge_topic_root(
     return ordered()
 
 
-def _message_topic_id(message: Any, topic_root_id: int | None = None) -> str:
+def _message_topic_id(
+        message: Any,
+        topic_root_id: int | None = None,
+        *,
+        is_forum: bool = False) -> str:
     if topic_root_id is not None and getattr(message, "id", None) == topic_root_id:
         return str(topic_root_id)
+
+    if not is_forum:
+        return "0"
 
     reply_header = getattr(message, "reply_to", None)
     top_id = getattr(reply_header, "reply_to_top_id", None)

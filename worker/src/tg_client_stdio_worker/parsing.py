@@ -136,10 +136,10 @@ class RegexSignalParser:
 
     def parse_message(self, message: RawMessage) -> ParsedMessage:
         parsed = ParsedMessage()
-        signal_matches: list[tuple[int, int, tuple[str, str, int | None]]] = []
-        outcome_matches: list[tuple[int, int, tuple[str, str]]] = []
+        signal_candidates: list[tuple[int, int, int, tuple[Any, ...], ParsedSignal, str]] = []
+        outcome_candidates: list[tuple[int, int, int, tuple[Any, ...], ParsedOutcome, str]] = []
 
-        for rule in self.signal_rules:
+        for priority, rule in enumerate(self.signal_rules):
             for match in rule.compile().finditer(message.text):
                 symbol = _normalize_symbol(_match_text(match, "symbol"))
                 direction = _normalize_direction(_match_text(match, "direction"))
@@ -156,10 +156,7 @@ class RegexSignalParser:
                     continue
                 signature = (symbol, direction, expiry)
                 start, end = match.span()
-                if _is_overlapping_duplicate(signal_matches, start, end, signature):
-                    continue
-                signal_matches.append((start, end, signature))
-                parsed.signals.append(ParsedSignal(
+                signal = ParsedSignal(
                     symbol=symbol,
                     direction=direction,
                     expiry_seconds=expiry,
@@ -167,9 +164,10 @@ class RegexSignalParser:
                     source_message_identity=message.message_identity,
                     source_revision_identity=message.revision_identity,
                     parser_rule=rule.name,
-                ))
+                )
+                signal_candidates.append((start, end, priority, signature, signal, rule.name))
 
-        for rule in self.outcome_rules:
+        for priority, rule in enumerate(self.outcome_rules):
             for match in rule.compile().finditer(message.text):
                 result = _normalize_result(_match_text(match, "result"))
                 if not result:
@@ -180,14 +178,9 @@ class RegexSignalParser:
                     ))
                     continue
                 symbol = _normalize_symbol(match.groupdict().get("symbol") or "")
-                if not symbol:
-                    symbol = _find_symbol(message.text)
                 signature = (result, symbol)
                 start, end = match.span()
-                if _is_overlapping_duplicate(outcome_matches, start, end, signature):
-                    continue
-                outcome_matches.append((start, end, signature))
-                parsed.outcomes.append(ParsedOutcome(
+                outcome = ParsedOutcome(
                     result=result,
                     symbol=symbol,
                     reply_to_message_id=message.reply_to_message_id,
@@ -195,6 +188,38 @@ class RegexSignalParser:
                     source_message_identity=message.message_identity,
                     source_revision_identity=message.revision_identity,
                     parser_rule=rule.name,
+                )
+                outcome_candidates.append((start, end, priority, signature, outcome, rule.name))
+
+        parsed.signals = _resolve_candidates(
+            signal_candidates,
+            parsed.diagnostics,
+            "ambiguous_overlapping_signal",
+        )
+        parsed.outcomes = _resolve_candidates(
+            outcome_candidates,
+            parsed.diagnostics,
+            "ambiguous_overlapping_outcome",
+        )
+
+        if parsed.outcomes:
+            symbols = _find_symbols(message.text)
+            if len(parsed.outcomes) == 1 and len(symbols) == 1:
+                outcome = parsed.outcomes[0]
+                if not outcome.symbol:
+                    parsed.outcomes[0] = ParsedOutcome(
+                        result=outcome.result,
+                        symbol=symbols[0],
+                        reply_to_message_id=outcome.reply_to_message_id,
+                        reply_to_message_identity=outcome.reply_to_message_identity,
+                        source_message_identity=outcome.source_message_identity,
+                        source_revision_identity=outcome.source_revision_identity,
+                        parser_rule=outcome.parser_rule,
+                    )
+            elif len(parsed.outcomes) > 1 and any(not outcome.symbol for outcome in parsed.outcomes):
+                parsed.diagnostics.append(ParseDiagnostic(
+                    code="ambiguous_outcome_symbol",
+                    message="outcome rule did not capture a symbol for multiple outcomes",
                 ))
 
         return parsed
@@ -207,17 +232,52 @@ def _match_text(match: re.Match[str], group_name: str) -> str:
     return value.strip()
 
 
-def _is_overlapping_duplicate(
-        matches: list[tuple[int, int, tuple[Any, ...]]],
-        start: int,
-        end: int,
-        signature: tuple[Any, ...]) -> bool:
-    return any(
-        existing_signature == signature
-        and start < existing_end
-        and existing_start < end
-        for existing_start, existing_end, existing_signature in matches
-    )
+def _resolve_candidates(
+        candidates: list[tuple[int, int, int, tuple[Any, ...], Any, str]],
+        diagnostics: list[ParseDiagnostic],
+        diagnostic_code: str) -> list[Any]:
+    accepted: list[tuple[int, int, int, tuple[Any, ...], Any, str]] = []
+    blocked: list[tuple[int, int]] = []
+
+    for candidate in sorted(candidates, key=lambda item: (item[0], item[2], item[1])):
+        start, end, _priority, signature, _value, rule_name = candidate
+        if any(start < blocked_end and blocked_start < end for blocked_start, blocked_end in blocked):
+            continue
+
+        duplicates = [
+            existing
+            for existing in accepted
+            if existing[3] == signature
+            and start < existing[1]
+            and existing[0] < end
+        ]
+        if duplicates:
+            continue
+
+        conflicts = [
+            existing
+            for existing in accepted
+            if start < existing[1] and existing[0] < end
+        ]
+        if conflicts:
+            conflict_start = min([start, *(existing[0] for existing in conflicts)])
+            conflict_end = max([end, *(existing[1] for existing in conflicts)])
+            accepted = [
+                existing
+                for existing in accepted
+                if not (start < existing[1] and existing[0] < end)
+            ]
+            blocked.append((conflict_start, conflict_end))
+            diagnostics.append(ParseDiagnostic(
+                code=diagnostic_code,
+                message="overlapping parser matches have conflicting semantics",
+                parser_rule=rule_name,
+            ))
+            continue
+
+        accepted.append(candidate)
+
+    return [candidate[4] for candidate in sorted(accepted, key=lambda item: item[0])]
 
 
 def _normalize_symbol(value: str) -> str:
@@ -225,11 +285,17 @@ def _normalize_symbol(value: str) -> str:
 
 
 def _find_symbol(value: str) -> str:
+    symbols = _find_symbols(value)
+    return symbols[0] if symbols else ""
+
+
+def _find_symbols(value: str) -> list[str]:
+    symbols: list[str] = []
     for symbol_match in re.finditer(rf"\b({_SYMBOL_PATTERN})\b", value, re.IGNORECASE):
         candidate = _normalize_symbol(symbol_match.group(1))
-        if candidate:
-            return candidate
-    return ""
+        if candidate and candidate not in symbols:
+            symbols.append(candidate)
+    return symbols
 
 
 def _normalize_direction(value: str) -> str:

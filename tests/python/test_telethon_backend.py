@@ -38,6 +38,7 @@ class FakeEntity:
     broadcast: bool = True
     megagroup: bool = False
     bot: bool = False
+    forum: bool = False
 
 
 @dataclass
@@ -253,6 +254,7 @@ class TelethonBackendCliTest(unittest.TestCase):
             TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
             telegram_client_factory=lambda *args, **kwargs: FakeTelethonClient(
                 *args,
+                entity=FakeEntity(forum=True),
                 messages=[reply],
                 topic_root=root,
                 **kwargs,
@@ -267,6 +269,37 @@ class TelethonBackendCliTest(unittest.TestCase):
             [message.message_identity for message in messages],
             ["telegram:-10042:42:42", "telegram:-10042:42:10"],
         )
+
+    def test_topic_query_is_rejected_for_non_forum_entity(self) -> None:
+        backend = TelethonBackend(
+            TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
+            telegram_client_factory=lambda *args, **kwargs: FakeTelethonClient(
+                *args,
+                messages=[FakeMessage(id=10, date=_dt(1784830000000))],
+                **kwargs,
+            ),
+        )
+
+        with self.assertRaises(Exception) as caught:
+            list(backend.iter_export_messages(
+                ExportQuery(chat="-10042", topic_id="42")))
+
+        self.assertIn("forum entity", str(caught.exception))
+
+    def test_channel_post_replies_do_not_create_forum_topic_identity(self) -> None:
+        backend = TelethonBackend(
+            TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
+            telegram_client_factory=lambda *args, **kwargs: FakeTelethonClient(
+                *args,
+                messages=[FakeMessage(id=10, date=_dt(1784830000000), replies=FakeReplies())],
+                **kwargs,
+            ),
+        )
+
+        messages = list(backend.iter_export_messages(ExportQuery(chat="-10042")))
+
+        self.assertEqual(messages[0].topic_id, "0")
+        self.assertEqual(messages[0].message_identity, "telegram:-10042:0:10")
 
     def test_topic_identity_is_stable_between_whole_chat_and_topic_export(self) -> None:
         root = FakeMessage(
@@ -283,6 +316,7 @@ class TelethonBackendCliTest(unittest.TestCase):
         def factory(*args: Any, **kwargs: Any) -> FakeTelethonClient:
             return FakeTelethonClient(
                 *args,
+                entity=FakeEntity(forum=True),
                 messages=[root, reply],
                 topic_root=root,
                 **kwargs,
