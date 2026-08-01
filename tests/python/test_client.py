@@ -26,6 +26,37 @@ def record(message_type: str, request_id: int, operation: str, payload: dict) ->
 
 
 class JsonlWorkerClientTest(unittest.TestCase):
+    def test_reads_worker_originated_live_event(self) -> None:
+        input_stream = io.BytesIO(record(
+            "event",
+            0,
+            "message.received",
+            {"message": {"message_id": 7}},
+        ))
+        output_stream = io.BytesIO()
+        client = JsonlWorkerClient(input_stream, output_stream)
+
+        seen: list[dict] = []
+        client._live_message_callback = seen.append
+        message = client.read_event()
+
+        self.assertEqual(message["message_id"], 7)
+        self.assertEqual(seen, [{"message_id": 7}])
+
+    def test_surfaces_worker_originated_live_error(self) -> None:
+        input_stream = io.BytesIO(record(
+            "error",
+            0,
+            "protocol.error",
+            {"code": "telegram_live_error", "message": "temporary", "fatal": False},
+        ))
+        client = JsonlWorkerClient(input_stream, io.BytesIO())
+
+        with self.assertRaises(WorkerClientError) as raised:
+            client.read_event()
+        self.assertEqual(raised.exception.code, "telegram_live_error")
+        self.assertFalse(raised.exception.fatal)
+
     def test_sends_request_and_reads_response(self) -> None:
         input_stream = io.BytesIO(record(
             "response",

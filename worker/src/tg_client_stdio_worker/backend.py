@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from collections.abc import Callable
 from typing import Any, Iterable, Protocol
 
 
@@ -62,6 +63,37 @@ class ExportQuery:
 
 
 @dataclass(frozen=True)
+class LiveQuery:
+    chats: tuple[str, ...]
+    topic_ids: tuple[str, ...] = ()
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "LiveQuery":
+        chats = payload.get("chats")
+        if not isinstance(chats, list) or not chats:
+            raise ValueError("chats must be a non-empty array")
+
+        normalized_chats = tuple(
+            _stringish(value, "chats[]")
+            for value in chats
+        )
+        if len(set(normalized_chats)) != len(normalized_chats):
+            raise ValueError("chats must not contain duplicates")
+
+        topic_ids = payload.get("topic_ids", [])
+        if not isinstance(topic_ids, list):
+            raise ValueError("topic_ids must be an array")
+        normalized_topics = tuple(
+            _stringish(value, "topic_ids[]")
+            for value in topic_ids
+        )
+        if len(set(normalized_topics)) != len(normalized_topics):
+            raise ValueError("topic_ids must not contain duplicates")
+
+        return cls(chats=normalized_chats, topic_ids=normalized_topics)
+
+
+@dataclass(frozen=True)
 class RawMessage:
     chat_id: str
     chat_title: str
@@ -104,12 +136,27 @@ class TelegramBackend(Protocol):
     def iter_export_messages(self, query: ExportQuery) -> Iterable[RawMessage]:
         ...
 
+    def start_listening(
+            self,
+            query: LiveQuery,
+            on_message: Callable[[RawMessage], None],
+            on_error: Callable[[BackendError], None]) -> None:
+        ...
+
+    def stop_listening(self) -> None:
+        ...
+
     def close(self) -> None:
         ...
 
 
 class MockTelegramBackend:
     """Deterministic backend used by protocol tests and early host integration."""
+
+    def __init__(self) -> None:
+        self._live_query: LiveQuery | None = None
+        self._live_callback: Callable[[RawMessage], None] | None = None
+        self._live_error_callback: Callable[[BackendError], None] | None = None
 
     def dialogs(self) -> Iterable[Dialog]:
         yield Dialog(
@@ -162,8 +209,40 @@ class MockTelegramBackend:
             emitted += 1
             yield message
 
+    def start_listening(
+            self,
+            query: LiveQuery,
+            on_message: Callable[[RawMessage], None],
+            on_error: Callable[[BackendError], None]) -> None:
+        if self._live_callback is not None:
+            raise BackendError("listen_already_active", "a live listener is already active")
+        self._live_query = query
+        self._live_callback = on_message
+        self._live_error_callback = on_error
+
+    def stop_listening(self) -> None:
+        self._live_query = None
+        self._live_callback = None
+        self._live_error_callback = None
+
+    def emit_live_message(self, message: RawMessage) -> None:
+        callback = self._live_callback
+        query = self._live_query
+        if callback is None or query is None:
+            return
+        if message.chat_id not in query.chats:
+            return
+        if query.topic_ids and message.topic_id not in query.topic_ids:
+            return
+        callback(message)
+
+    def emit_live_error(self, code: str, message: str, fatal: bool = False) -> None:
+        callback = self._live_error_callback
+        if callback is not None:
+            callback(BackendError(code, message, fatal))
+
     def close(self) -> None:
-        pass
+        self.stop_listening()
 
 
 def _stringish(value: Any, name: str) -> str:

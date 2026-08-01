@@ -82,6 +82,10 @@ dialogs = client.dialogs()
 
 messages = []
 summary = client.stream_messages({"chat": "-1001234567890"}, messages.append)
+
+client.start_listening(["-1001234567890"], messages.append)
+next_message = client.read_event()
+client.stop_listening()
 ```
 
 Process spawning and restart policy intentionally stay outside this helper so a
@@ -135,8 +139,8 @@ trade DTOs is a host-application concern.
 ## C++ Helper
 
 The first C++ layer is intentionally small: it builds protocol envelopes and
-keeps message type names consistent with the worker. Process supervision will be
-added after the worker protocol has settled.
+keeps message type names consistent with the worker. Process supervision will
+be added after the worker protocol has settled.
 
 ## Multi-Account Policy
 

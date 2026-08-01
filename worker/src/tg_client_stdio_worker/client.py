@@ -50,11 +50,20 @@ class JsonlWorkerClient:
         self._max_outbound_jsonl_bytes = max_jsonl_bytes
         self._next_request_id = 1
         self._session_error: WorkerClientError | None = None
+        self._live_message_callback: Callable[[dict[str, Any]], None] | None = None
 
     def request(self, operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         request_id = self._send_request(operation, payload or {})
         while True:
             record = self._read_record()
+            if record.request_id == 0 and record.message_type == "event":
+                self._dispatch_live_event(record)
+                continue
+            if record.request_id == 0 and record.message_type == "error":
+                worker_error = self._worker_error(record)
+                if worker_error.fatal:
+                    self._poison_session(worker_error.code, worker_error.message)
+                raise worker_error
             if record.request_id != request_id:
                 raise self._poison_session(
                     "unexpected_record",
@@ -151,6 +160,45 @@ class JsonlWorkerClient:
                 raise worker_error
             raise self._poison_session("unexpected_record", "unexpected worker record")
 
+    def start_listening(
+            self,
+            chats: list[str],
+            on_message: Callable[[dict[str, Any]], None] | None = None,
+            topic_ids: list[str] | None = None) -> dict[str, Any]:
+        """Start one live listener; future events are read with ``read_event``."""
+        if not isinstance(chats, list) or not chats:
+            raise ValueError("chats must be a non-empty list")
+        self._live_message_callback = on_message
+        try:
+            return self.request("messages.listen", {
+                "chats": chats,
+                "topic_ids": topic_ids or [],
+            })
+        except BaseException:
+            self._live_message_callback = None
+            raise
+
+    def read_event(self) -> dict[str, Any]:
+        """Read one worker-originated live message event."""
+        self._ensure_session_usable()
+        record = self._read_record()
+        if record.request_id != 0 or record.message_type != "event":
+            if record.request_id == 0 and record.message_type == "error":
+                worker_error = self._worker_error(record)
+                if worker_error.fatal:
+                    self._poison_session(worker_error.code, worker_error.message)
+                raise worker_error
+            raise self._poison_session(
+                "unexpected_live_record",
+                "expected a worker-originated live event",
+            )
+        return self._dispatch_live_event(record)
+
+    def stop_listening(self) -> dict[str, Any]:
+        result = self.request("messages.stop")
+        self._live_message_callback = None
+        return result
+
     def shutdown(self) -> dict[str, Any]:
         return self.request("shutdown")
 
@@ -190,6 +238,29 @@ class JsonlWorkerClient:
     def _ensure_session_usable(self) -> None:
         if self._session_error is not None:
             raise self._session_error
+
+    def _dispatch_live_event(self, record: Envelope) -> dict[str, Any]:
+        if record.operation != "message.received":
+            raise self._poison_session(
+                "unexpected_live_event",
+                f"unexpected live event {record.operation}",
+            )
+        message = record.payload.get("message")
+        if not isinstance(message, dict):
+            raise self._poison_session(
+                "invalid_live_event",
+                "message.received payload must contain a message object",
+            )
+        if self._live_message_callback is not None:
+            try:
+                self._live_message_callback(message)
+            except BaseException as exc:
+                failure = self._poison_session(
+                    "callback_failed",
+                    "live message callback failed; worker session is unusable",
+                )
+                raise failure from exc
+        return message
 
     def _poison_session(self, code: str, message: str) -> WorkerClientError:
         if self._session_error is None:

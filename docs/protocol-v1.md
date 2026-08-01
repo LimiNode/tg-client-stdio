@@ -183,13 +183,47 @@ Terminal `messages.export` response payload:
 
 ### `messages.listen`
 
-Starts live message events for configured chats. Worker-originated live
-`message.received` events may use `request_id = 0` after listen has been
-accepted.
+Starts one live listener for the configured chats. A worker accepts at most one
+active listener; a second request fails with `listen_already_active`. The
+request payload is:
+
+```json
+{
+  "chats": ["-1001234567890", "signals"],
+  "topic_ids": []
+}
+```
+
+The terminal response confirms acceptance:
+
+```json
+{
+  "accepted": true,
+  "chats": ["-1001234567890"],
+  "topic_ids": []
+}
+```
+
+After that response, each live message is emitted as a worker-originated
+`message.received` event with `request_id = 0`:
+
+```json
+{
+  "protocol_version": 1,
+  "message_type": "event",
+  "request_id": 0,
+  "operation": "message.received",
+  "payload": {"message": {}}
+}
+```
+
+The host must keep draining the event stream or stop the listener rather than
+allow unbounded buffering.
 
 ### `messages.stop`
 
-Stops live message events for a previous listen operation.
+Stops the active live listener. It is idempotent and returns
+`{"stopped":true}` even when no listener is active.
 
 ### `shutdown`
 

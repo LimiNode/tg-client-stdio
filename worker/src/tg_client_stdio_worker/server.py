@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import replace
+import threading
 from typing import Any, BinaryIO, TextIO
 
 from . import __version__
-from .backend import BackendError, ExportQuery, MockTelegramBackend, TelegramBackend
+from .backend import (
+    BackendError,
+    ExportQuery,
+    LiveQuery,
+    MockTelegramBackend,
+    TelegramBackend,
+)
 from .protocol import (
     DEFAULT_MAX_JSONL_RECORD_BYTES,
     Envelope,
@@ -50,6 +57,10 @@ class JsonlWorkerServer:
         self._backend_name = backend_name or _infer_backend_name(backend)
         self._shutdown_requested = False
         self._exit_code = 0
+        self._listen_active = False
+        self._output_lock = threading.RLock()
+        self._live_events_ready = True
+        self._pending_live_records: list[Envelope] = []
 
     def run(self) -> int:
         try:
@@ -111,6 +122,10 @@ class JsonlWorkerServer:
 
     def _close_backend(self) -> None:
         try:
+            self._backend.stop_listening()
+        except Exception as exc:
+            print(f"failed to stop live listener: {exc}", file=self._error)
+        try:
             self._backend.close()
         except Exception as exc:
             print(f"failed to close backend: {exc}", file=self._error)
@@ -158,6 +173,54 @@ class JsonlWorkerServer:
             self._write(response(request, {"messages": count, "truncated": truncated}))
             return
 
+        if request.operation == "messages.listen":
+            try:
+                query = LiveQuery.from_payload(request.payload)
+            except ValueError as exc:
+                self._write(error(request, "invalid_listen_query", str(exc)))
+                return
+            if self._listen_active:
+                self._write(error(request, "listen_already_active", "a live listener is already active"))
+                return
+            with self._output_lock:
+                self._live_events_ready = False
+            try:
+                self._backend.start_listening(
+                    query,
+                    self._on_live_message,
+                    self._on_live_error,
+                )
+            except BackendError as exc:
+                with self._output_lock:
+                    self._live_events_ready = True
+                    self._pending_live_records.clear()
+                self._write_backend_error(request, exc)
+                return
+            self._listen_active = True
+            self._write(response(request, {
+                "accepted": True,
+                "chats": list(query.chats),
+                "topic_ids": list(query.topic_ids),
+            }))
+            with self._output_lock:
+                self._live_events_ready = True
+                pending = self._pending_live_records
+                self._pending_live_records = []
+                for record in pending:
+                    self._write(record)
+            return
+
+        if request.operation == "messages.stop":
+            if self._listen_active:
+                try:
+                    self._backend.stop_listening()
+                except BackendError as exc:
+                    self._write_backend_error(request, exc)
+                    return
+                self._listen_active = False
+            self._write(response(request, {"stopped": True}))
+            return
+
         if request.operation == "shutdown":
             self._write(response(request, {"accepted": True}))
             self._shutdown_requested = True
@@ -173,7 +236,8 @@ class JsonlWorkerServer:
             "capabilities": {
                 "dialogs_list": True,
                 "messages_export": True,
-                "messages_listen": False,
+                "messages_listen": True,
+                "messages_stop": True,
                 "auth_interactive": False,
                 "multi_account": False,
                 "max_jsonl_record_bytes": self._config.max_jsonl_bytes,
@@ -181,8 +245,26 @@ class JsonlWorkerServer:
         }
 
     def _write(self, envelope: Envelope) -> None:
-        self._output.write(encode_envelope(envelope, self._config.max_jsonl_bytes))
-        self._output.flush()
+        with self._output_lock:
+            self._output.write(encode_envelope(envelope, self._config.max_jsonl_bytes))
+            self._output.flush()
+
+    def _on_live_message(self, message: Any) -> None:
+        self._emit_live_record(event(0, "message.received", {"message": message.to_payload()}))
+
+    def _on_live_error(self, exc: BackendError) -> None:
+        self._emit_live_record(error(None, exc.code, exc.message, exc.fatal))
+        self._listen_active = False
+        if exc.fatal:
+            self._shutdown_requested = True
+            self._exit_code = 1
+
+    def _emit_live_record(self, record: Envelope) -> None:
+        with self._output_lock:
+            if not self._live_events_ready:
+                self._pending_live_records.append(record)
+                return
+            self._write(record)
 
     def _write_backend_error(self, request: Envelope, exc: BackendError) -> None:
         self._write(error(request, exc.code, exc.message, exc.fatal))
