@@ -4,14 +4,17 @@ import contextlib
 import importlib.util
 import io
 import json
+import sys
+from threading import Event, get_ident
 import unittest
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
-from tg_client_stdio_worker.backend import BackendError, ExportQuery
+from tg_client_stdio_worker.backend import BackendError, ExportQuery, LiveQuery
 from tg_client_stdio_worker.cli import main
 from tg_client_stdio_worker.protocol import Envelope, encode_envelope
 from tg_client_stdio_worker.server import JsonlWorkerServer
@@ -80,6 +83,10 @@ class MessageActionTopicCreate:
     pass
 
 
+class SessionPasswordNeededError(Exception):
+    pass
+
+
 @dataclass
 class FakeMessage:
     id: int
@@ -102,10 +109,11 @@ class FakeTelethonClient:
             *args: Any,
             authorized: bool = True,
             connect_raises: bool = False,
-        entity: Any | None = None,
-        messages: list[FakeMessage] | None = None,
-        topic_root: FakeMessage | None = None,
-        forum_topics: dict[int, FakeForumTopic] | None = None,
+            entity: Any | None = None,
+            messages: list[FakeMessage] | None = None,
+            topic_root: FakeMessage | None = None,
+            forum_topics: dict[int, FakeForumTopic] | None = None,
+            password_required: bool = False,
         **kwargs: Any) -> None:
         self.authorized = authorized
         self.connect_raises = connect_raises
@@ -115,14 +123,19 @@ class FakeTelethonClient:
         self.messages = messages or []
         self.topic_root = topic_root
         self.forum_topics = forum_topics or {}
+        self.password_required = password_required
+        self.sent_code_phone: str | None = None
+        self.sign_in_calls: list[dict[str, Any]] = []
         self.consumed_messages = 0
         self.iter_messages_kwargs: dict[str, Any] = {}
         self.last_entity_ref: Any | None = None
         self.last_iter_messages_chat: Any | None = None
         self.last_forum_request: Any | None = None
+        self.thread_ids: list[int] = []
         FakeTelethonClient.last_instance = self
 
     def connect(self) -> None:
+        self.thread_ids.append(get_ident())
         if self.connect_raises:
             raise RuntimeError("connect failed")
         self.connected = True
@@ -133,7 +146,18 @@ class FakeTelethonClient:
     def is_user_authorized(self) -> bool:
         return self.authorized
 
+    def send_code_request(self, phone: str) -> Any:
+        self.sent_code_phone = phone
+        return SimpleNamespace(phone_code_hash="hash-1")
+
+    def sign_in(self, **kwargs: Any) -> None:
+        self.sign_in_calls.append(kwargs)
+        if "password" not in kwargs and self.password_required:
+            raise SessionPasswordNeededError("two-factor password required")
+        self.authorized = True
+
     def iter_dialogs(self) -> list[FakeDialog]:
+        self.thread_ids.append(get_ident())
         return [FakeDialog(id=-10042, name="Signals", entity=self.entity)]
 
     def get_entity(self, chat: str | int) -> FakeEntity:
@@ -164,13 +188,20 @@ class FakeTelethonClient:
         return None
 
     def iter_messages(self, chat: Any, **kwargs: Any) -> Iterable[FakeMessage]:
+        self.thread_ids.append(get_ident())
         self.last_iter_messages_chat = chat
         self.iter_messages_kwargs = kwargs
         offset_date = kwargs.get("offset_date")
         reverse = bool(kwargs.get("reverse", False))
+        min_id = kwargs.get("min_id")
 
         def consume() -> Any:
-            for message in self.messages:
+            messages = self.messages
+            if min_id is not None:
+                messages = [message for message in messages if message.id > min_id]
+                if reverse:
+                    messages = sorted(messages, key=lambda message: message.id)
+            for message in messages:
                 if offset_date is not None:
                     if reverse and not (message.date > offset_date):
                         continue
@@ -183,6 +214,161 @@ class FakeTelethonClient:
 
 
 class TelethonBackendCliTest(unittest.TestCase):
+    def test_live_poll_reads_new_messages_oldest_first(self) -> None:
+        messages = [
+            FakeMessage(id=1, date=_dt(1000)),
+            FakeMessage(id=2, date=_dt(2000)),
+            FakeMessage(id=3, date=_dt(3000)),
+            FakeMessage(id=4, date=_dt(4000)),
+        ]
+        backend = TelethonBackend(
+            TelethonBackendConfig(
+                api_id=1,
+                api_hash="hash",
+                session="session",
+                live_poll_interval_seconds=0.01,
+            ),
+            telegram_client_factory=lambda *args, **kwargs: FakeTelethonClient(
+                *args, messages=messages, **kwargs),
+        )
+        stopped = Event()
+        received: list[int] = []
+
+        def collect(message: Any) -> None:
+            received.append(message.message_id)
+            if len(received) == 3:
+                stopped.set()
+
+        backend.start_listening(
+            LiveQuery(chats=("-10042",)),
+            collect,
+            lambda exc: self.fail(str(exc)),
+        )
+        self.assertTrue(stopped.wait(2.0))
+        backend.stop_listening()
+
+        self.assertEqual(received, [2, 3, 4])
+        client = FakeTelethonClient.last_instance
+        assert client is not None
+        self.assertEqual(client.iter_messages_kwargs["min_id"], 1)
+        self.assertTrue(client.iter_messages_kwargs["reverse"])
+
+    def test_live_listener_can_restart_after_poll_failure(self) -> None:
+        errors: list[BackendError] = []
+        failed = Event()
+        calls = 0
+
+        class FailingOnceClient(FakeTelethonClient):
+            def iter_messages(self, chat: Any, **kwargs: Any) -> Iterable[FakeMessage]:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise RuntimeError("poll failed")
+                return super().iter_messages(chat, **kwargs)
+
+        backend = TelethonBackend(
+            TelethonBackendConfig(
+                api_id=1,
+                api_hash="hash",
+                session="session",
+                live_poll_interval_seconds=0.01,
+            ),
+            telegram_client_factory=lambda *args, **kwargs: FailingOnceClient(
+                *args,
+                messages=[FakeMessage(id=1, date=_dt(1000))],
+                **kwargs,
+            ),
+        )
+
+        backend.start_listening(
+            LiveQuery(chats=("-10042",)),
+            lambda _message: None,
+            lambda exc: (errors.append(exc), failed.set()),
+        )
+        self.assertTrue(failed.wait(2.0))
+        self.assertEqual([error.code for error in errors], ["telegram_live_error"])
+
+        backend.start_listening(
+            LiveQuery(chats=("-10042",)),
+            lambda _message: None,
+            self.fail,
+        )
+        backend.stop_listening()
+
+    def test_telethon_client_operations_stay_on_owner_thread(self) -> None:
+        backend = TelethonBackend(
+            TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
+            telegram_client_factory=lambda *args, **kwargs: FakeTelethonClient(
+                *args,
+                messages=[FakeMessage(id=10, date=_dt(1784830000000))],
+                **kwargs,
+            ),
+        )
+
+        list(backend.dialogs())
+        list(backend.iter_export_messages(ExportQuery(chat="-10042")))
+        client = FakeTelethonClient.last_instance
+        assert client is not None
+        self.assertTrue(client.thread_ids)
+        self.assertEqual(len(set(client.thread_ids)), 1)
+
+    def test_auth_operations_support_code_and_two_factor_flow(self) -> None:
+        backend = TelethonBackend(
+            TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
+            telegram_client_factory=lambda *args, **kwargs: FakeTelethonClient(
+                *args,
+                authorized=False,
+                password_required=True,
+                **kwargs,
+            ),
+        )
+
+        self.assertEqual(
+            backend.auth_status(),
+            {"authorized": False, "password_required": False},
+        )
+        self.assertTrue(backend.auth_send_code("+10000000000")["code_sent"])
+        self.assertEqual(
+            backend.auth_submit_code("12345"),
+            {
+                "authorized": False,
+                "code_sent": False,
+                "password_required": True,
+            },
+        )
+        self.assertEqual(
+            backend.auth_submit_password("secret"),
+            {"authorized": True, "password_required": False},
+        )
+        client = FakeTelethonClient.last_instance
+        assert client is not None
+        self.assertEqual(client.sent_code_phone, "+10000000000")
+        self.assertEqual(client.sign_in_calls[0]["phone_code_hash"], "hash-1")
+
+    def test_proxy_url_is_converted_without_logging_credentials(self) -> None:
+        from tg_client_stdio_worker.cli import parse_proxy
+
+        with patch.dict(sys.modules, {"socks": SimpleNamespace(SOCKS5=5, HTTP=3)}):
+            proxy = parse_proxy("socks5://user:p%40ss@127.0.0.1:1080")
+
+        self.assertEqual(proxy[0], 5)
+        self.assertEqual(proxy[1:4], ("127.0.0.1", 1080, False))
+        self.assertEqual(proxy[4:], ("user", "p@ss"))
+
+    def test_telegram_extra_provides_proxy_dependency(self) -> None:
+        import socks
+        from tg_client_stdio_worker.cli import parse_proxy
+
+        self.assertTrue(hasattr(socks, "SOCKS5"))
+        proxy = parse_proxy("socks5://127.0.0.1:1080")
+        self.assertEqual(proxy[0], socks.SOCKS5)
+
+    def test_proxy_url_requires_supported_scheme(self) -> None:
+        from tg_client_stdio_worker.cli import parse_proxy
+
+        with self.assertRaises(ValueError):
+            parse_proxy("ftp://127.0.0.1:21")
+
     @unittest.skipUnless(
         importlib.util.find_spec("telethon") is not None,
         "requires the optional Telethon dependency",
@@ -699,7 +885,7 @@ class TelethonBackendCliTest(unittest.TestCase):
 
         client = FakeTelethonClient.last_instance
         self.assertIn("connect failed", str(caught.exception))
-        self.assertIsNone(backend._client)
+        self.assertFalse(backend._runtime.has_client())
         assert client is not None
         self.assertTrue(client.disconnected)
 

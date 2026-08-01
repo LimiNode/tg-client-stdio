@@ -14,11 +14,13 @@ Early scaffold. The repository currently contains:
 - protocol v1 design and envelope rules;
 - a Python mock worker that speaks the JSONL protocol;
 - an optional Telethon-backed worker backend for pre-authorized sessions;
-- C++17 header-only envelope helpers;
+- C++17 header-only envelope and process-supervisor helpers;
 - tests for the mock worker and C++ protocol helper.
 
 The mock backend exists so host applications can build and test the stdio
-contract before Telegram authorization is wired in.
+contract without Telegram credentials. The Telethon backend already exposes
+the authorization lifecycle through the protocol; an authorized-session E2E
+check is kept separate because it requires operator-provided Telegram access.
 
 ## Repository Layout
 
@@ -58,6 +60,18 @@ The Telethon backend is optional and requires a pre-authorized session:
 python -m pip install -e ".[telegram]"
 tg-client-stdio-worker --backend telethon --api-id 123 --api-hash ... --session ./session
 ```
+
+The Telegram client and its asyncio loop are owned by one dedicated worker
+thread. Host requests are serialized through that owner; the Telethon client
+must not be used directly from host or callback threads. The `telegram` extra
+also installs `PySocks`, which is required for `socks5://` and `socks5h://`
+proxy URLs.
+
+The worker also exposes `auth.status`, `auth.send_code`,
+`auth.submit_code`, and `auth.submit_password` over JSONL. This keeps stdin
+reserved for protocol records while allowing a host application to own the
+login UI. Proxy URLs can be supplied with `--proxy` using `http://`,
+`socks5://`, or `socks5h://` schemes.
 
 Interactive Telegram login is intentionally outside JSONL stdio; stdin is
 reserved for protocol records.
@@ -136,11 +150,50 @@ parser = RegexSignalParser.from_payload({
 The parser returns neutral Python dataclasses. Mapping them to broker-specific
 trade DTOs is a host-application concern.
 
-## C++ Helper
+## C++ Worker Supervisor
 
-The first C++ layer is intentionally small: it builds protocol envelopes and
-keeps message type names consistent with the worker. Process supervision will
-be added after the worker protocol has settled.
+`include/tg_client_stdio/worker_client.hpp` provides a small C++17 host-side
+supervisor for one worker process. It owns the process, performs the `hello`
+handshake, correlates request responses, dispatches request-id-zero live
+events, streams typed `RawMessage` records for archive export, and enforces
+bounded JSONL input/output and event-queue limits:
+
+```cpp
+#include <tg_client_stdio/worker_client.hpp>
+
+tg_client_stdio::WorkerProcessConfig config;
+config.command = {"python", "-m", "tg_client_stdio_worker", "--mock"};
+
+tg_client_stdio::WorkerClient worker;
+worker.start(config, [](const auto& event) {
+    // Handle message.received or other worker-originated events.
+});
+
+const auto dialogs = worker.dialogs();
+const auto typed_dialogs = worker.list_dialogs();
+const auto auth = worker.get_auth_status();
+tg_client_stdio::ExportQuery query;
+query.chat = "-1001234567890";
+worker.stream_messages(query, [](const tg_client_stdio::RawMessage& message) {
+    // Convert or persist one message at a time.
+});
+worker.start_listening({"-1001234567890"});
+worker.stop_listening();
+worker.stop();
+```
+
+`list_dialogs()` and `get_auth_status()` are typed convenience wrappers around
+the same JSONL operations. They validate the normalized dialog identity/title
+and authorization booleans before returning C++ DTOs.
+
+`WorkerClient` is deliberately a process/protocol API, not an OptionX DTO
+layer. One instance owns one worker and therefore one Telegram session. A
+host that needs several accounts should create one instance per session and
+coordinate them at the application level.
+
+The C++ supervisor uses the vendored `tiny-process-library` and
+`nlohmann-json` submodules. They are implementation dependencies of this
+repository and are not part of the Python worker contract.
 
 ## Multi-Account Policy
 

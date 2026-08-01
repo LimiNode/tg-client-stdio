@@ -221,6 +221,43 @@ class JsonlWorkerServer:
             self._write(response(request, {"stopped": True}))
             return
 
+        if request.operation == "auth.status":
+            self._handle_auth_request(request, lambda: self._backend.auth_status())
+            return
+
+        if request.operation == "auth.send_code":
+            phone = request.payload.get("phone", "")
+            if not isinstance(phone, str):
+                self._write(error(request, "invalid_auth_request", "phone must be a string"))
+                return
+            self._handle_auth_request(
+                request,
+                lambda: self._backend.auth_send_code(phone),
+            )
+            return
+
+        if request.operation == "auth.submit_code":
+            code = request.payload.get("code", "")
+            if not isinstance(code, str):
+                self._write(error(request, "invalid_auth_request", "code must be a string"))
+                return
+            self._handle_auth_request(
+                request,
+                lambda: self._backend.auth_submit_code(code),
+            )
+            return
+
+        if request.operation == "auth.submit_password":
+            password = request.payload.get("password", "")
+            if not isinstance(password, str):
+                self._write(error(request, "invalid_auth_request", "password must be a string"))
+                return
+            self._handle_auth_request(
+                request,
+                lambda: self._backend.auth_submit_password(password),
+            )
+            return
+
         if request.operation == "shutdown":
             self._write(response(request, {"accepted": True}))
             self._shutdown_requested = True
@@ -238,7 +275,11 @@ class JsonlWorkerServer:
                 "messages_export": True,
                 "messages_listen": True,
                 "messages_stop": True,
-                "auth_interactive": False,
+                "auth_status": True,
+                "auth_send_code": True,
+                "auth_submit_code": True,
+                "auth_submit_password": True,
+                "auth_interactive": True,
                 "multi_account": False,
                 "max_jsonl_record_bytes": self._config.max_jsonl_bytes,
             },
@@ -271,6 +312,12 @@ class JsonlWorkerServer:
         if exc.fatal:
             self._shutdown_requested = True
             self._exit_code = 1
+
+    def _handle_auth_request(self, request: Envelope, operation: Any) -> None:
+        try:
+            self._write(response(request, operation()))
+        except BackendError as exc:
+            self._write_backend_error(request, exc)
 
     def _write_session_error(self, code: str, message: str, fatal: bool) -> None:
         try:
