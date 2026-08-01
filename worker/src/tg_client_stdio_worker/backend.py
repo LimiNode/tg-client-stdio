@@ -146,6 +146,18 @@ class TelegramBackend(Protocol):
     def stop_listening(self) -> None:
         ...
 
+    def auth_status(self) -> dict[str, Any]:
+        ...
+
+    def auth_send_code(self, phone: str) -> dict[str, Any]:
+        ...
+
+    def auth_submit_code(self, code: str) -> dict[str, Any]:
+        ...
+
+    def auth_submit_password(self, password: str) -> dict[str, Any]:
+        ...
+
     def close(self) -> None:
         ...
 
@@ -224,6 +236,24 @@ class MockTelegramBackend:
         self._live_query = None
         self._live_callback = None
         self._live_error_callback = None
+
+    def auth_status(self) -> dict[str, Any]:
+        return {"authorized": True, "password_required": False}
+
+    def auth_send_code(self, phone: str) -> dict[str, Any]:
+        if not phone.strip():
+            raise BackendError("invalid_auth_request", "phone must not be empty")
+        return {"authorized": True, "code_sent": False, "password_required": False}
+
+    def auth_submit_code(self, code: str) -> dict[str, Any]:
+        if not code.strip():
+            raise BackendError("invalid_auth_request", "code must not be empty")
+        return self.auth_status()
+
+    def auth_submit_password(self, password: str) -> dict[str, Any]:
+        if not password:
+            raise BackendError("invalid_auth_request", "password must not be empty")
+        return self.auth_status()
 
     def emit_live_message(self, message: RawMessage) -> None:
         callback = self._live_callback

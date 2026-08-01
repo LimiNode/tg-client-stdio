@@ -4,12 +4,14 @@ import contextlib
 import importlib.util
 import io
 import json
+import sys
 import unittest
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from tg_client_stdio_worker.backend import BackendError, ExportQuery
 from tg_client_stdio_worker.cli import main
@@ -80,6 +82,10 @@ class MessageActionTopicCreate:
     pass
 
 
+class SessionPasswordNeededError(Exception):
+    pass
+
+
 @dataclass
 class FakeMessage:
     id: int
@@ -102,10 +108,11 @@ class FakeTelethonClient:
             *args: Any,
             authorized: bool = True,
             connect_raises: bool = False,
-        entity: Any | None = None,
-        messages: list[FakeMessage] | None = None,
-        topic_root: FakeMessage | None = None,
-        forum_topics: dict[int, FakeForumTopic] | None = None,
+            entity: Any | None = None,
+            messages: list[FakeMessage] | None = None,
+            topic_root: FakeMessage | None = None,
+            forum_topics: dict[int, FakeForumTopic] | None = None,
+            password_required: bool = False,
         **kwargs: Any) -> None:
         self.authorized = authorized
         self.connect_raises = connect_raises
@@ -115,6 +122,9 @@ class FakeTelethonClient:
         self.messages = messages or []
         self.topic_root = topic_root
         self.forum_topics = forum_topics or {}
+        self.password_required = password_required
+        self.sent_code_phone: str | None = None
+        self.sign_in_calls: list[dict[str, Any]] = []
         self.consumed_messages = 0
         self.iter_messages_kwargs: dict[str, Any] = {}
         self.last_entity_ref: Any | None = None
@@ -132,6 +142,16 @@ class FakeTelethonClient:
 
     def is_user_authorized(self) -> bool:
         return self.authorized
+
+    def send_code_request(self, phone: str) -> Any:
+        self.sent_code_phone = phone
+        return SimpleNamespace(phone_code_hash="hash-1")
+
+    def sign_in(self, **kwargs: Any) -> None:
+        self.sign_in_calls.append(kwargs)
+        if "password" not in kwargs and self.password_required:
+            raise SessionPasswordNeededError("two-factor password required")
+        self.authorized = True
 
     def iter_dialogs(self) -> list[FakeDialog]:
         return [FakeDialog(id=-10042, name="Signals", entity=self.entity)]
@@ -183,6 +203,55 @@ class FakeTelethonClient:
 
 
 class TelethonBackendCliTest(unittest.TestCase):
+    def test_auth_operations_support_code_and_two_factor_flow(self) -> None:
+        backend = TelethonBackend(
+            TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
+            telegram_client_factory=lambda *args, **kwargs: FakeTelethonClient(
+                *args,
+                authorized=False,
+                password_required=True,
+                **kwargs,
+            ),
+        )
+
+        self.assertEqual(
+            backend.auth_status(),
+            {"authorized": False, "password_required": False},
+        )
+        self.assertTrue(backend.auth_send_code("+10000000000")["code_sent"])
+        self.assertEqual(
+            backend.auth_submit_code("12345"),
+            {
+                "authorized": False,
+                "code_sent": False,
+                "password_required": True,
+            },
+        )
+        self.assertEqual(
+            backend.auth_submit_password("secret"),
+            {"authorized": True, "password_required": False},
+        )
+        client = FakeTelethonClient.last_instance
+        assert client is not None
+        self.assertEqual(client.sent_code_phone, "+10000000000")
+        self.assertEqual(client.sign_in_calls[0]["phone_code_hash"], "hash-1")
+
+    def test_proxy_url_is_converted_without_logging_credentials(self) -> None:
+        from tg_client_stdio_worker.cli import parse_proxy
+
+        with patch.dict(sys.modules, {"socks": SimpleNamespace(SOCKS5=5, HTTP=3)}):
+            proxy = parse_proxy("socks5://user:p%40ss@127.0.0.1:1080")
+
+        self.assertEqual(proxy[0], 5)
+        self.assertEqual(proxy[1:4], ("127.0.0.1", 1080, False))
+        self.assertEqual(proxy[4:], ("user", "p@ss"))
+
+    def test_proxy_url_requires_supported_scheme(self) -> None:
+        from tg_client_stdio_worker.cli import parse_proxy
+
+        with self.assertRaises(ValueError):
+            parse_proxy("ftp://127.0.0.1:21")
+
     @unittest.skipUnless(
         importlib.util.find_spec("telethon") is not None,
         "requires the optional Telethon dependency",

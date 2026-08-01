@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from urllib.parse import unquote, urlsplit
 
 from .backend import BackendError
 from .protocol import DEFAULT_MAX_JSONL_RECORD_BYTES, MIN_MAX_JSONL_RECORD_BYTES
@@ -41,6 +42,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-id", type=int, help="Telegram API ID for Telethon backend.")
     parser.add_argument("--api-hash", help="Telegram API hash for Telethon backend.")
     parser.add_argument("--session", help="Telethon session path/name.")
+    parser.add_argument("--phone", help="Default phone number for auth.send_code.")
+    parser.add_argument(
+        "--proxy",
+        help="Proxy URL, for example socks5://127.0.0.1:1080 or http://user:pass@host:8080.",
+    )
+    parser.add_argument(
+        "--live-poll-interval",
+        type=float,
+        default=1.0,
+        help="Polling interval in seconds for the Telethon live listener.",
+    )
     parser.add_argument(
         "--max-jsonl-bytes",
         type=jsonl_byte_limit,
@@ -92,5 +104,33 @@ def build_backend(args: argparse.Namespace) -> object:
             api_id=args.api_id,
             api_hash=args.api_hash,
             session=args.session,
+            phone=args.phone or "",
+            proxy=parse_proxy(args.proxy) if args.proxy else None,
+            live_poll_interval_seconds=args.live_poll_interval,
         )
+    )
+
+
+def parse_proxy(value: str) -> tuple[object, str, int, bool, str | None, str | None]:
+    """Convert a proxy URL into the tuple accepted by Telethon/PySocks."""
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() not in {"http", "socks5", "socks5h"}:
+        raise ValueError("proxy scheme must be http, socks5, or socks5h")
+    if not parsed.hostname or parsed.port is None:
+        raise ValueError("proxy must include host and port")
+    try:
+        import socks  # type: ignore
+    except ImportError as exc:
+        raise ValueError("install tg-client-stdio-worker[telegram] for proxy support") from exc
+
+    proxy_type = socks.HTTP if parsed.scheme.lower() == "http" else socks.SOCKS5
+    username = unquote(parsed.username) if parsed.username is not None else None
+    password = unquote(parsed.password) if parsed.password is not None else None
+    return (
+        proxy_type,
+        parsed.hostname,
+        parsed.port,
+        parsed.scheme.lower() != "socks5",
+        username,
+        password,
     )

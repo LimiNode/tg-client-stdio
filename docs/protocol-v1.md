@@ -91,8 +91,13 @@ Worker response:
       "capabilities": {
       "dialogs_list": true,
       "messages_export": true,
-      "messages_listen": false,
-      "auth_interactive": false,
+      "messages_listen": true,
+      "messages_stop": true,
+      "auth_status": true,
+      "auth_send_code": true,
+      "auth_submit_code": true,
+      "auth_submit_password": true,
+      "auth_interactive": true,
       "multi_account": false,
       "max_jsonl_record_bytes": 1048576
     }
@@ -224,6 +229,22 @@ allow unbounded buffering.
 
 Stops the active live listener. It is idempotent and returns
 `{"stopped":true}` even when no listener is active.
+
+### Authentication operations
+
+The worker keeps Telegram authorization state in its session. JSONL stdin is
+still never used for an interactive prompt; authentication values are sent as
+normal request payloads:
+
+- `auth.status` returns `authorized` and `password_required`.
+- `auth.send_code` accepts `{ "phone": "+10000000000" }`.
+- `auth.submit_code` accepts `{ "code": "12345" }`.
+- `auth.submit_password` accepts `{ "password": "..." }`.
+
+Passwords must not be logged or echoed in responses. A successful
+`auth.submit_code` may return `password_required=true`; the host then submits
+the second-factor password through the dedicated operation. Authorization
+errors remain correlated to the request that caused them.
 
 ### `shutdown`
 
