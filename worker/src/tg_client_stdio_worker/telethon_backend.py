@@ -192,8 +192,8 @@ class TelethonBackend:
                 fatal=True,
             ) from exc
 
-        result = client(functions.channels.GetForumTopicsByIDRequest(
-            channel=input_entity,
+        result = client(functions.messages.GetForumTopicsByIDRequest(
+            peer=input_entity,
             topics=[topic_id],
         ))
         for topic in getattr(result, "topics", ()) or ():

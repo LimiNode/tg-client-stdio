@@ -8,6 +8,7 @@ import unittest
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 from tg_client_stdio_worker.backend import BackendError, ExportQuery
@@ -118,6 +119,7 @@ class FakeTelethonClient:
         self.iter_messages_kwargs: dict[str, Any] = {}
         self.last_entity_ref: Any | None = None
         self.last_iter_messages_chat: Any | None = None
+        self.last_forum_request: Any | None = None
         FakeTelethonClient.last_instance = self
 
     def connect(self) -> None:
@@ -143,6 +145,15 @@ class FakeTelethonClient:
 
     def get_input_entity(self, entity: Any) -> Any:
         return entity
+
+    def __call__(self, request: Any) -> Any:
+        self.last_forum_request = request
+        topics = [
+            self.forum_topics[topic_id]
+            for topic_id in getattr(request, "topics", ())
+            if topic_id in self.forum_topics
+        ]
+        return SimpleNamespace(topics=topics)
 
     def get_messages(self, chat: Any, ids: int) -> FakeMessage | None:
         if self.topic_root is not None and self.topic_root.id == ids:
@@ -172,6 +183,39 @@ class FakeTelethonClient:
 
 
 class TelethonBackendCliTest(unittest.TestCase):
+    @unittest.skipUnless(
+        importlib.util.find_spec("telethon") is not None,
+        "requires the optional Telethon dependency",
+    )
+    def test_real_telethon_forum_topic_request_uses_messages_namespace(self) -> None:
+        from telethon import functions
+
+        root = FakeMessage(
+            id=42,
+            date=_dt(1784829000000),
+            action=MessageActionTopicCreate(),
+        )
+        backend = TelethonBackend(
+            TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
+            telegram_client_factory=lambda *args, **kwargs: FakeTelethonClient(
+                *args,
+                entity=FakeEntity(forum=True),
+                messages=[root],
+                topic_root=root,
+                forum_topics={42: FakeForumTopic(id=42)},
+                **kwargs,
+            ),
+        )
+
+        list(backend.iter_export_messages(ExportQuery(chat="-10042", topic_id="42")))
+
+        client = FakeTelethonClient.last_instance
+        assert client is not None
+        request = client.last_forum_request
+        self.assertIsInstance(request, functions.messages.GetForumTopicsByIDRequest)
+        self.assertEqual(request.peer, client.entity)
+        self.assertEqual(request.topics, [42])
+
     @unittest.skipIf(
         importlib.util.find_spec("telethon") is not None,
         "test only covers the missing optional dependency path",
