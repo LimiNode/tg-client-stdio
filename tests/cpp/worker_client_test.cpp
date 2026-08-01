@@ -54,6 +54,10 @@ for line in sys.stdin:
         send(0, "event", "message.received", {
             "message": {"id": "7", "chat_id": "42", "text": "BUY EURUSD"}
         })
+        send(0, "error", "session", {
+            "code": "session_failed",
+            "message": "session error delivered as an uncorrelated record",
+        })
     elif operation == "messages.stop":
         send(request_id, "response", operation, {"listening": False})
     elif operation == "shutdown":
@@ -75,12 +79,18 @@ for line in sys.stdin:
     std::mutex mutex;
     std::condition_variable condition;
     nlohmann::json received_event;
+    nlohmann::json received_error;
 
     tg_client_stdio::WorkerClient client;
     expect(client.start(config, [&](const auto& event) {
         {
             std::lock_guard<std::mutex> lock(mutex);
-            received_event = event;
+            if (event.value("message_type", "") == "error") {
+                received_error = event;
+            }
+            else {
+                received_event = event;
+            }
         }
         condition.notify_all();
     }), "worker did not start");
@@ -104,6 +114,14 @@ for line in sys.stdin:
            "live event operation mismatch");
     expect(received_event.at("payload").at("message").at("id") == "7",
            "live event payload mismatch");
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        expect(condition.wait_for(lock, std::chrono::seconds(2), [&] {
+            return !received_error.is_null();
+        }), "uncorrelated worker error was not delivered");
+    }
+    expect(received_error.at("payload").at("code") == "session_failed",
+           "uncorrelated worker error payload mismatch");
 
     expect(client.stop_listening(), "listener did not stop");
     client.stop();

@@ -43,8 +43,8 @@ struct WorkerProcessConfig {
 ///
 /// The client owns one worker process and its stdin/stdout pipes. stdout is
 /// parsed as bounded JSONL; stderr is diagnostics only. Requests are
-/// correlated by request ID, while request ID zero events are delivered to the
-/// event callback from the client's dispatcher thread.
+/// correlated by request ID, while request ID zero events and session errors
+/// are delivered to the event callback from the client's dispatcher thread.
 ///
 /// Lifecycle calls should be serialized by the owner. Calling stop() from an
 /// event callback sends a graceful shutdown request and returns; the owner
@@ -417,7 +417,7 @@ private:
 
                 const auto type = record.value("message_type", "");
                 const auto request_id = record.value("request_id", 0ull);
-                if (type == "event") {
+                if (type == "event" || (type == "error" && request_id == 0)) {
                     if (request_id == 0) {
                         handler = event_handler_;
                     }
