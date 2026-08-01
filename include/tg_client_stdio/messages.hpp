@@ -8,8 +8,56 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace tg_client_stdio {
+
+/// \struct Dialog
+/// \brief Normalized Telegram dialog metadata for account/channel selection.
+struct Dialog {
+    std::string chat_id;
+    std::string title;
+    std::string username;
+    std::string kind;
+
+    /// \brief Parses one dialog returned by `dialogs.list`.
+    static Dialog from_json(const nlohmann::json& value) {
+        if (!value.is_object()) {
+            throw std::invalid_argument("Telegram dialog must be an object");
+        }
+        Dialog dialog;
+        dialog.chat_id = value.at("chat_id").get<std::string>();
+        dialog.title = value.at("title").get<std::string>();
+        dialog.username = value.value("username", "");
+        dialog.kind = value.value("kind", "");
+        if (dialog.chat_id.empty() || dialog.title.empty()) {
+            throw std::invalid_argument("Telegram dialog identity is incomplete");
+        }
+        return dialog;
+    }
+};
+
+/// \struct AuthStatus
+/// \brief Typed authorization state returned by the worker.
+struct AuthStatus {
+    bool authorized = false;
+    bool password_required = false;
+
+    /// \brief Parses an `auth.status` response payload.
+    static AuthStatus from_json(const nlohmann::json& value) {
+        if (!value.is_object() ||
+            !value.contains("authorized") ||
+            !value.contains("password_required") ||
+            value.at("authorized").type() != nlohmann::json::value_t::boolean ||
+            value.at("password_required").type() != nlohmann::json::value_t::boolean) {
+            throw std::invalid_argument("Telegram auth status is incomplete");
+        }
+        return {
+            value.at("authorized").get<bool>(),
+            value.at("password_required").get<bool>(),
+        };
+    }
+};
 
 /// \struct ExportQuery
 /// \brief Bounded historical message export request.

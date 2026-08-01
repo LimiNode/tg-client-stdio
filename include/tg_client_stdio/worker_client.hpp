@@ -196,9 +196,29 @@ public:
         return request("dialogs.list", json::object());
     }
 
+    /// \brief Returns normalized dialog metadata for account/channel selection.
+    std::vector<Dialog> list_dialogs() {
+        const auto payload = dialogs();
+        const auto& values = payload.at("dialogs");
+        if (!values.is_array()) {
+            throw std::runtime_error("worker dialogs response is not an array");
+        }
+        std::vector<Dialog> result;
+        result.reserve(values.size());
+        for (const auto& value : values) {
+            result.push_back(Dialog::from_json(value));
+        }
+        return result;
+    }
+
     /// \brief Returns the worker authorization status.
     json auth_status() {
         return request("auth.status", json::object());
+    }
+
+    /// \brief Returns typed authorization state for the worker session.
+    AuthStatus get_auth_status() {
+        return AuthStatus::from_json(auth_status());
     }
 
     /// \brief Sends a Telegram login code request.

@@ -18,7 +18,9 @@ Early scaffold. The repository currently contains:
 - tests for the mock worker and C++ protocol helper.
 
 The mock backend exists so host applications can build and test the stdio
-contract before Telegram authorization is wired in.
+contract without Telegram credentials. The Telethon backend already exposes
+the authorization lifecycle through the protocol; an authorized-session E2E
+check is kept separate because it requires operator-provided Telegram access.
 
 ## Repository Layout
 
@@ -162,6 +164,8 @@ worker.start(config, [](const auto& event) {
 });
 
 const auto dialogs = worker.dialogs();
+const auto typed_dialogs = worker.list_dialogs();
+const auto auth = worker.get_auth_status();
 tg_client_stdio::ExportQuery query;
 query.chat = "-1001234567890";
 worker.stream_messages(query, [](const tg_client_stdio::RawMessage& message) {
@@ -171,6 +175,10 @@ worker.start_listening({"-1001234567890"});
 worker.stop_listening();
 worker.stop();
 ```
+
+`list_dialogs()` and `get_auth_status()` are typed convenience wrappers around
+the same JSONL operations. They validate the normalized dialog identity/title
+and authorization booleans before returning C++ DTOs.
 
 `WorkerClient` is deliberately a process/protocol API, not an OptionX DTO
 layer. One instance owns one worker and therefore one Telegram session. A

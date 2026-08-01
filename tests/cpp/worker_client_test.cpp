@@ -46,9 +46,14 @@ for line in sys.stdin:
             "max_jsonl_record_bytes": 1048576,
         })
     elif operation == "dialogs.list":
-        send(request_id, "response", operation, {"dialogs": [{"id": "42"}]})
+        send(request_id, "response", operation, {"dialogs": [{
+            "chat_id": "42", "title": "Signals",
+            "username": "signals", "kind": "channel"
+        }]})
     elif operation == "auth.status":
-        send(request_id, "response", operation, {"authorized": False})
+        send(request_id, "response", operation, {
+            "authorized": False, "password_required": False
+        })
     elif operation == "messages.export":
         send(request_id, "event", "export.started", {})
         send(request_id, "event", "export.message", {
@@ -118,11 +123,19 @@ for line in sys.stdin:
     expect(client.is_running(), "worker is not running after handshake");
 
     const auto dialogs = client.dialogs();
-    expect(dialogs.at("dialogs").at(0).at("id") == "42",
+    expect(dialogs.at("dialogs").at(0).at("chat_id") == "42",
            "dialogs response mismatch");
+    const auto typed_dialogs = client.list_dialogs();
+    expect(typed_dialogs.size() == 1 &&
+               typed_dialogs.front().title == "Signals" &&
+               typed_dialogs.front().kind == "channel",
+           "typed dialog response mismatch");
 
     const auto auth = client.auth_status();
     expect(!auth.at("authorized").get<bool>(), "auth response mismatch");
+    const auto typed_auth = client.get_auth_status();
+    expect(!typed_auth.authorized && !typed_auth.password_required,
+           "typed auth response mismatch");
 
     tg_client_stdio::ExportQuery export_query;
     export_query.chat = "42";
