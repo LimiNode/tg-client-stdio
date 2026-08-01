@@ -29,10 +29,12 @@ class TelethonBackend:
     def __init__(
             self,
             config: TelethonBackendConfig,
-            telegram_client_factory: Callable[..., Any] | None = None) -> None:
+            telegram_client_factory: Callable[..., Any] | None = None,
+            forum_topic_resolver: Callable[..., Any] | None = None) -> None:
         self._config = config
         self._client: Any | None = None
         self._telegram_client_factory = telegram_client_factory
+        self._forum_topic_resolver = forum_topic_resolver
 
     def dialogs(self) -> Iterable[Dialog]:
         try:
@@ -82,11 +84,27 @@ class TelethonBackend:
                     "invalid_export_query",
                     "topic_id requires a Telegram forum entity",
                 )
+            if reply_to is not None:
+                resolved_topic = self._resolve_forum_topic(
+                    client,
+                    input_entity,
+                    reply_to,
+                )
+                if resolved_topic is None:
+                    raise BackendError(
+                        "invalid_export_query",
+                        "topic_id does not identify a Telegram forum topic",
+                    )
             canonical_chat_id = _canonical_peer_id(entity)
             chat_title = _entity_title(entity, query.chat)
             messages = client.iter_messages(input_entity, **kwargs)
             if reply_to is not None:
                 root_message = client.get_messages(input_entity, ids=reply_to)
+                if root_message is None:
+                    raise BackendError(
+                        "invalid_export_query",
+                        "forum topic root was not found",
+                    )
                 messages = _merge_topic_root(
                     root_message,
                     messages,
@@ -151,6 +169,33 @@ class TelethonBackend:
             )
         return self._client
 
+    def _resolve_forum_topic(
+            self,
+            client: Any,
+            input_entity: Any,
+            topic_id: int) -> Any | None:
+        if self._forum_topic_resolver is not None:
+            resolved = self._forum_topic_resolver(client, input_entity, topic_id)
+            return resolved if _is_forum_topic_record(resolved, topic_id) else None
+
+        try:
+            from telethon import functions  # type: ignore
+        except ImportError as exc:
+            raise BackendError(
+                "dependency_missing",
+                "install tg-client-stdio-worker[telegram] to resolve forum topics",
+                fatal=True,
+            ) from exc
+
+        result = client(functions.channels.GetForumTopicsByIDRequest(
+            channel=input_entity,
+            topics=[topic_id],
+        ))
+        for topic in getattr(result, "topics", ()) or ():
+            if _is_forum_topic_record(topic, topic_id):
+                return topic
+        return None
+
     def close(self) -> None:
         client = self._client
         self._client = None
@@ -177,6 +222,16 @@ def _topic_id_to_reply_to(topic_id: str) -> int | None:
         raise BackendError("invalid_export_query", "topic_id must be a decimal integer")
     numeric = int(topic_id)
     return numeric if numeric > 0 else None
+
+
+def _is_forum_topic_record(topic: Any, topic_id: int) -> bool:
+    # forumTopicDeleted has only an id; it must not validate a stale topic
+    # query as an existing topic.
+    return (
+        topic is not None
+        and getattr(topic, "id", None) == topic_id
+        and getattr(topic, "top_message", None) is not None
+    )
 
 
 def _telethon_chat_ref(value: str) -> str | int:
@@ -223,13 +278,16 @@ def _message_topic_id(
     if isinstance(top_id, int) and top_id > 0:
         return str(top_id)
 
-    # Forum roots expose a replies header even though they do not reply to
-    # another message. Its own message ID is the stable topic identity.
-    replies = getattr(message, "replies", None)
-    if replies is not None and getattr(replies, "replies", None) is not None:
+    action = getattr(message, "action", None)
+    if type(action).__name__ == "MessageActionTopicCreate":
         message_id = getattr(message, "id", None)
         if isinstance(message_id, int) and message_id > 0:
             return str(message_id)
+
+    # A validated topic filter is authoritative even if Telegram omitted the
+    # reply header from an individual message.
+    if topic_root_id is not None:
+        return str(topic_root_id)
     return "0"
 
 

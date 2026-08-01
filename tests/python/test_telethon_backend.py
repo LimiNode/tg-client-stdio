@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from tg_client_stdio_worker.backend import ExportQuery
+from tg_client_stdio_worker.backend import BackendError, ExportQuery
 from tg_client_stdio_worker.cli import main
 from tg_client_stdio_worker.protocol import Envelope, encode_envelope
 from tg_client_stdio_worker.server import JsonlWorkerServer
@@ -69,6 +69,17 @@ class FakeReplies:
 
 
 @dataclass
+class FakeForumTopic:
+    id: int
+    top_message: int = 0
+
+
+@dataclass
+class MessageActionTopicCreate:
+    pass
+
+
+@dataclass
 class FakeMessage:
     id: int
     date: datetime
@@ -79,6 +90,7 @@ class FakeMessage:
     grouped_id: str = ""
     reply_to: FakeReplyHeader | None = None
     replies: FakeReplies | None = None
+    action: Any | None = None
 
 
 class FakeTelethonClient:
@@ -92,6 +104,7 @@ class FakeTelethonClient:
         entity: Any | None = None,
         messages: list[FakeMessage] | None = None,
         topic_root: FakeMessage | None = None,
+        forum_topics: dict[int, FakeForumTopic] | None = None,
         **kwargs: Any) -> None:
         self.authorized = authorized
         self.connect_raises = connect_raises
@@ -100,6 +113,7 @@ class FakeTelethonClient:
         self.disconnected = False
         self.messages = messages or []
         self.topic_root = topic_root
+        self.forum_topics = forum_topics or {}
         self.consumed_messages = 0
         self.iter_messages_kwargs: dict[str, Any] = {}
         self.last_entity_ref: Any | None = None
@@ -133,6 +147,9 @@ class FakeTelethonClient:
     def get_messages(self, chat: Any, ids: int) -> FakeMessage | None:
         if self.topic_root is not None and self.topic_root.id == ids:
             return self.topic_root
+        for message in self.messages:
+            if message.id == ids:
+                return message
         return None
 
     def iter_messages(self, chat: Any, **kwargs: Any) -> Iterable[FakeMessage]:
@@ -243,7 +260,7 @@ class TelethonBackendCliTest(unittest.TestCase):
         root = FakeMessage(
             id=42,
             date=_dt(1784829000000),
-            replies=FakeReplies(),
+            action=MessageActionTopicCreate(),
         )
         reply = FakeMessage(
             id=10,
@@ -257,8 +274,10 @@ class TelethonBackendCliTest(unittest.TestCase):
                 entity=FakeEntity(forum=True),
                 messages=[reply],
                 topic_root=root,
+                forum_topics={42: FakeForumTopic(id=42)},
                 **kwargs,
             ),
+            forum_topic_resolver=lambda client, _entity, topic_id: client.forum_topics.get(topic_id),
         )
 
         messages = list(backend.iter_export_messages(ExportQuery(chat="@signals", topic_id="042")))
@@ -286,6 +305,44 @@ class TelethonBackendCliTest(unittest.TestCase):
 
         self.assertIn("forum entity", str(caught.exception))
 
+    def test_topic_query_rejects_an_ordinary_forum_message_id(self) -> None:
+        root = FakeMessage(
+            id=42,
+            date=_dt(1784829000000),
+            action=MessageActionTopicCreate(),
+        )
+        ordinary_message = FakeMessage(
+            id=77,
+            date=_dt(1784830000000),
+            reply_to=FakeReplyHeader(reply_to_top_id=42),
+        )
+
+        def factory(*args: Any, **kwargs: Any) -> FakeTelethonClient:
+            return FakeTelethonClient(
+                *args,
+                entity=FakeEntity(forum=True),
+                messages=[root, ordinary_message],
+                topic_root=root,
+                forum_topics={42: FakeForumTopic(id=42)},
+                **kwargs,
+            )
+
+        def resolve_topic(client: FakeTelethonClient, _entity: Any, topic_id: int) -> Any:
+            return client.forum_topics.get(topic_id)
+
+        backend = TelethonBackend(
+            TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
+            telegram_client_factory=factory,
+            forum_topic_resolver=resolve_topic,
+        )
+
+        with self.assertRaises(BackendError) as caught:
+            list(backend.iter_export_messages(
+                ExportQuery(chat="-10042", topic_id="77")))
+
+        self.assertEqual(caught.exception.code, "invalid_export_query")
+        self.assertIn("forum topic", str(caught.exception))
+
     def test_channel_post_replies_do_not_create_forum_topic_identity(self) -> None:
         backend = TelethonBackend(
             TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
@@ -305,7 +362,7 @@ class TelethonBackendCliTest(unittest.TestCase):
         root = FakeMessage(
             id=42,
             date=_dt(1784829000000),
-            replies=FakeReplies(),
+            action=MessageActionTopicCreate(),
         )
         reply = FakeMessage(
             id=10,
@@ -319,12 +376,14 @@ class TelethonBackendCliTest(unittest.TestCase):
                 entity=FakeEntity(forum=True),
                 messages=[root, reply],
                 topic_root=root,
+                forum_topics={42: FakeForumTopic(id=42)},
                 **kwargs,
             )
 
         backend = TelethonBackend(
             TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
             telegram_client_factory=factory,
+            forum_topic_resolver=lambda client, _entity, topic_id: client.forum_topics.get(topic_id),
         )
         whole_chat = list(backend.iter_export_messages(ExportQuery(chat="-10042")))
         topic = list(backend.iter_export_messages(
@@ -334,6 +393,37 @@ class TelethonBackendCliTest(unittest.TestCase):
         topic_by_id = {message.message_id: message.message_identity for message in topic}
         self.assertEqual(whole_by_id[42], topic_by_id[42])
         self.assertEqual(whole_by_id[10], topic_by_id[10])
+
+    def test_topic_root_without_replies_keeps_identity_between_exports(self) -> None:
+        root = FakeMessage(
+            id=42,
+            date=_dt(1784829000000),
+            action=MessageActionTopicCreate(),
+        )
+
+        def factory(*args: Any, **kwargs: Any) -> FakeTelethonClient:
+            return FakeTelethonClient(
+                *args,
+                entity=FakeEntity(forum=True),
+                messages=[root],
+                topic_root=root,
+                forum_topics={42: FakeForumTopic(id=42)},
+                **kwargs,
+            )
+
+        backend = TelethonBackend(
+            TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
+            telegram_client_factory=factory,
+            forum_topic_resolver=lambda client, _entity, topic_id: client.forum_topics.get(topic_id),
+        )
+
+        whole_chat = list(backend.iter_export_messages(ExportQuery(chat="-10042")))
+        topic = list(backend.iter_export_messages(
+            ExportQuery(chat="-10042", topic_id="42")))
+
+        self.assertEqual(whole_chat[0].topic_id, "42")
+        self.assertEqual(topic[0].topic_id, "42")
+        self.assertEqual(whole_chat[0].message_identity, topic[0].message_identity)
 
     def test_zero_padded_topic_zero_does_not_set_reply_to(self) -> None:
         backend = TelethonBackend(
