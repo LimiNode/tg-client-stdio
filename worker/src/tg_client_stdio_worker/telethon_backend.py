@@ -18,6 +18,7 @@ class TelethonBackendConfig:
     session: str
     proxy: Any = None
     live_poll_interval_seconds: float = 1.0
+    phone: str = ""
 
 
 class TelethonBackend:
@@ -42,6 +43,9 @@ class TelethonBackend:
         self._live_lock = Lock()
         self._live_stop: Event | None = None
         self._live_thread: Thread | None = None
+        self._auth_phone = config.phone
+        self._phone_code_hash: str | None = None
+        self._password_required = False
 
     def dialogs(self) -> Iterable[Dialog]:
         try:
@@ -191,6 +195,77 @@ class TelethonBackend:
         if thread is not current_thread():
             thread.join()
 
+    def auth_status(self) -> dict[str, Any]:
+        try:
+            client = self._connected_client()
+            authorized = bool(client.is_user_authorized())
+            return {
+                "authorized": authorized,
+                "password_required": bool(self._password_required and not authorized),
+            }
+        except BackendError:
+            raise
+        except Exception as exc:
+            raise BackendError("telegram_auth_error", str(exc)) from exc
+
+    def auth_send_code(self, phone: str) -> dict[str, Any]:
+        normalized_phone = phone.strip() or self._auth_phone.strip()
+        if not normalized_phone:
+            raise BackendError("invalid_auth_request", "phone must not be empty")
+        try:
+            result = self._connected_client().send_code_request(normalized_phone)
+            self._auth_phone = normalized_phone
+            self._phone_code_hash = str(getattr(result, "phone_code_hash", "") or "")
+            self._password_required = False
+            return {
+                "authorized": False,
+                "code_sent": True,
+                "password_required": False,
+            }
+        except BackendError:
+            raise
+        except Exception as exc:
+            raise BackendError("telegram_auth_error", str(exc)) from exc
+
+    def auth_submit_code(self, code: str) -> dict[str, Any]:
+        if not code.strip():
+            raise BackendError("invalid_auth_request", "code must not be empty")
+        if not self._auth_phone:
+            raise BackendError("invalid_auth_request", "send auth code before submitting it")
+        try:
+            kwargs: dict[str, Any] = {
+                "phone": self._auth_phone,
+                "code": code.strip(),
+            }
+            if self._phone_code_hash:
+                kwargs["phone_code_hash"] = self._phone_code_hash
+            self._connected_client().sign_in(**kwargs)
+            self._password_required = False
+            return self.auth_status()
+        except Exception as exc:
+            if type(exc).__name__ == "SessionPasswordNeededError":
+                self._password_required = True
+                return {
+                    "authorized": False,
+                    "code_sent": False,
+                    "password_required": True,
+                }
+            if isinstance(exc, BackendError):
+                raise
+            raise BackendError("telegram_auth_error", str(exc)) from exc
+
+    def auth_submit_password(self, password: str) -> dict[str, Any]:
+        if not password:
+            raise BackendError("invalid_auth_request", "password must not be empty")
+        try:
+            self._connected_client().sign_in(password=password)
+            self._password_required = False
+            return self.auth_status()
+        except Exception as exc:
+            if isinstance(exc, BackendError):
+                raise
+            raise BackendError("telegram_auth_error", str(exc)) from exc
+
     def _prepare_live_watches(
             self,
             client: Any,
@@ -262,6 +337,15 @@ class TelethonBackend:
             on_error(BackendError("telegram_live_error", str(exc), fatal=False))
 
     def _authorized_client(self) -> Any:
+        client = self._connected_client()
+        if not client.is_user_authorized():
+            raise BackendError(
+                "authorization_required",
+                "Telethon session is not authorized; authorize it through auth operations first",
+            )
+        return client
+
+    def _connected_client(self) -> Any:
         if self._client is None:
             factory = self._telegram_client_factory or _load_telegram_client_factory()
             client = factory(
@@ -272,11 +356,6 @@ class TelethonBackend:
             )
             try:
                 client.connect()
-                if not client.is_user_authorized():
-                    raise BackendError(
-                        "authorization_required",
-                        "Telethon session is not authorized; authorize it outside JSONL stdio first",
-                    )
             except BackendError:
                 _disconnect_best_effort(client)
                 raise
@@ -284,11 +363,6 @@ class TelethonBackend:
                 _disconnect_best_effort(client)
                 raise BackendError("telegram_backend_error", str(exc)) from exc
             self._client = client
-        if not self._client.is_user_authorized():
-            raise BackendError(
-                "authorization_required",
-                "Telethon session is not authorized; authorize it outside JSONL stdio first",
-            )
         return self._client
 
     def _resolve_forum_topic(

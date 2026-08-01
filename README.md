@@ -59,6 +59,12 @@ python -m pip install -e ".[telegram]"
 tg-client-stdio-worker --backend telethon --api-id 123 --api-hash ... --session ./session
 ```
 
+The worker also exposes `auth.status`, `auth.send_code`,
+`auth.submit_code`, and `auth.submit_password` over JSONL. This keeps stdin
+reserved for protocol records while allowing a host application to own the
+login UI. Proxy URLs can be supplied with `--proxy` using `http://`,
+`socks5://`, or `socks5h://` schemes.
+
 Interactive Telegram login is intentionally outside JSONL stdio; stdin is
 reserved for protocol records.
 
