@@ -147,7 +147,8 @@ trade DTOs is a host-application concern.
 `include/tg_client_stdio/worker_client.hpp` provides a small C++17 host-side
 supervisor for one worker process. It owns the process, performs the `hello`
 handshake, correlates request responses, dispatches request-id-zero live
-events, and enforces bounded JSONL input/output and event-queue limits:
+events, streams typed `RawMessage` records for archive export, and enforces
+bounded JSONL input/output and event-queue limits:
 
 ```cpp
 #include <tg_client_stdio/worker_client.hpp>
@@ -161,6 +162,11 @@ worker.start(config, [](const auto& event) {
 });
 
 const auto dialogs = worker.dialogs();
+tg_client_stdio::ExportQuery query;
+query.chat = "-1001234567890";
+worker.stream_messages(query, [](const tg_client_stdio::RawMessage& message) {
+    // Convert or persist one message at a time.
+});
 worker.start_listening({"-1001234567890"});
 worker.stop_listening();
 worker.stop();

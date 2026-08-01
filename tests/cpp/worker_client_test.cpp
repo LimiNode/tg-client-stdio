@@ -49,6 +49,27 @@ for line in sys.stdin:
         send(request_id, "response", operation, {"dialogs": [{"id": "42"}]})
     elif operation == "auth.status":
         send(request_id, "response", operation, {"authorized": False})
+    elif operation == "messages.export":
+        send(request_id, "event", "export.started", {})
+        send(request_id, "event", "export.message", {
+            "message": {
+                "chat_id": "42", "chat_title": "Signals", "topic_id": "7",
+                "message_id": 11, "date_ms": 1800000000000,
+                "edit_date_ms": 0, "sender_id": "99",
+                "reply_to_message_id": 0, "grouped_id": "",
+                "text": "EURUSD BUY 5m", "media": []
+            }
+        })
+        send(request_id, "event", "export.message", {
+            "message": {
+                "chat_id": "42", "chat_title": "Signals", "topic_id": "7",
+                "message_id": 12, "date_ms": 1800000005000,
+                "edit_date_ms": 1800000006000, "sender_id": "99",
+                "reply_to_message_id": 11, "grouped_id": "album-1",
+                "text": "WIN", "media": [{"kind": "photo"}]
+            }
+        })
+        send(request_id, "response", operation, {"messages": 2, "truncated": False})
     elif operation == "messages.listen":
         send(request_id, "response", operation, {"listening": True})
         send(0, "event", "message.received", {
@@ -102,6 +123,21 @@ for line in sys.stdin:
 
     const auto auth = client.auth_status();
     expect(!auth.at("authorized").get<bool>(), "auth response mismatch");
+
+    tg_client_stdio::ExportQuery export_query;
+    export_query.chat = "42";
+    export_query.topic_id = "7";
+    std::vector<tg_client_stdio::RawMessage> messages;
+    const auto summary = client.stream_messages(export_query, [&](const auto& message) {
+        messages.push_back(message);
+    });
+    expect(summary.messages == 2 && !summary.truncated,
+           "export summary mismatch");
+    expect(messages.size() == 2, "export message count mismatch");
+    expect(messages[0].message_identity() == "telegram:42:7:11",
+           "raw message identity mismatch");
+    expect(messages[1].reply_to_message_identity() == "telegram:42:7:11",
+           "raw reply identity mismatch");
 
     expect(client.start_listening({"42"}), "listener did not start");
     {
