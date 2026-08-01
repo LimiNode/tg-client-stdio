@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import sys
+from threading import Event
 import unittest
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
-from tg_client_stdio_worker.backend import BackendError, ExportQuery
+from tg_client_stdio_worker.backend import BackendError, ExportQuery, LiveQuery
 from tg_client_stdio_worker.cli import main
 from tg_client_stdio_worker.protocol import Envelope, encode_envelope
 from tg_client_stdio_worker.server import JsonlWorkerServer
@@ -188,9 +189,15 @@ class FakeTelethonClient:
         self.iter_messages_kwargs = kwargs
         offset_date = kwargs.get("offset_date")
         reverse = bool(kwargs.get("reverse", False))
+        min_id = kwargs.get("min_id")
 
         def consume() -> Any:
-            for message in self.messages:
+            messages = self.messages
+            if min_id is not None:
+                messages = [message for message in messages if message.id > min_id]
+                if reverse:
+                    messages = sorted(messages, key=lambda message: message.id)
+            for message in messages:
                 if offset_date is not None:
                     if reverse and not (message.date > offset_date):
                         continue
@@ -203,6 +210,43 @@ class FakeTelethonClient:
 
 
 class TelethonBackendCliTest(unittest.TestCase):
+    def test_live_poll_reads_new_messages_oldest_first(self) -> None:
+        messages = [
+            FakeMessage(id=1, date=_dt(1000)),
+            FakeMessage(id=2, date=_dt(2000)),
+            FakeMessage(id=3, date=_dt(3000)),
+            FakeMessage(id=4, date=_dt(4000)),
+        ]
+        client = FakeTelethonClient(messages=messages)
+        backend = TelethonBackend(
+            TelethonBackendConfig(
+                api_id=1,
+                api_hash="hash",
+                session="session",
+                live_poll_interval_seconds=0.01,
+            ),
+        )
+        stop = Event()
+        received: list[int] = []
+
+        def collect(message: Any) -> None:
+            received.append(message.message_id)
+            if len(received) == 3:
+                stop.set()
+
+        backend._poll_live(
+            client,
+            [(client.entity, "-10042", "Signals", 1, False)],
+            LiveQuery(chats=("-10042",)),
+            stop,
+            collect,
+            lambda exc: self.fail(str(exc)),
+        )
+
+        self.assertEqual(received, [2, 3, 4])
+        self.assertEqual(client.iter_messages_kwargs["min_id"], 1)
+        self.assertTrue(client.iter_messages_kwargs["reverse"])
+
     def test_auth_operations_support_code_and_two_factor_flow(self) -> None:
         backend = TelethonBackend(
             TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
