@@ -54,6 +54,89 @@ class RegexSignalParserTest(unittest.TestCase):
         self.assertEqual(signal.direction, "BUY")
         self.assertEqual(signal.expiry_seconds, 300)
 
+    def test_parse_message_returns_all_non_overlapping_signals_and_outcomes(self) -> None:
+        parser = RegexSignalParser.from_payload(
+            {
+                "signal_rules": [
+                    {
+                        "name": "signals",
+                        "pattern": (
+                            r"(?P<symbol>EURUSD|GBPUSD)\s+"
+                            r"(?P<direction>BUY|SELL)\s+"
+                            r"(?P<expiry>\d+)(?P<expiry_unit>m)"
+                        ),
+                    }
+                ],
+                "outcome_rules": [
+                    {
+                        "name": "outcomes",
+                        "pattern": r"(?P<result>WIN|LOSS)\s+(?P<symbol>EURUSD|GBPUSD)",
+                    }
+                ],
+            }
+        )
+
+        parsed = parser.parse_message(raw(
+            "EURUSD BUY 5m\nGBPUSD SELL 10m\nWIN EURUSD\nLOSS GBPUSD"
+        ))
+
+        self.assertEqual(
+            [(signal.symbol, signal.direction, signal.expiry_seconds) for signal in parsed.signals],
+            [("EURUSD", "BUY", 300), ("GBPUSD", "SELL", 600)],
+        )
+        self.assertEqual(
+            [(outcome.result, outcome.symbol) for outcome in parsed.outcomes],
+            [("WIN", "EURUSD"), ("LOSS", "GBPUSD")],
+        )
+        self.assertEqual(parsed.diagnostics, [])
+
+    def test_parse_message_deduplicates_overlapping_rule_matches(self) -> None:
+        parser = RegexSignalParser.from_payload(
+            {
+                "signal_rules": [
+                    {
+                        "name": "first",
+                        "pattern": r"(?P<symbol>EURUSD)\s+(?P<direction>BUY)\s+(?P<expiry>5)(?P<expiry_unit>m)",
+                    },
+                    {
+                        "name": "second",
+                        "pattern": r"(?P<symbol>EURUSD)\s+(?P<direction>BUY)\s+(?P<expiry>5)(?P<expiry_unit>m)",
+                    },
+                ]
+            }
+        )
+
+        parsed = parser.parse_message(raw("EURUSD BUY 5m"))
+
+        self.assertEqual(len(parsed.signals), 1)
+
+    def test_parse_message_rejects_conflicting_overlapping_signal_matches(self) -> None:
+        parser = RegexSignalParser.from_payload(
+            {
+                "signal_rules": [
+                    {
+                        "name": "generic",
+                        "pattern": r"(?P<symbol>EURUSD)\s+(?P<direction>BUY)",
+                    },
+                    {
+                        "name": "specific",
+                        "pattern": (
+                            r"(?P<symbol>EURUSD)\s+(?P<direction>BUY)\s+"
+                            r"(?P<expiry>5)(?P<expiry_unit>m)"
+                        ),
+                    },
+                ]
+            }
+        )
+
+        parsed = parser.parse_message(raw("EURUSD BUY 5m"))
+
+        self.assertEqual(parsed.signals, [])
+        self.assertTrue(any(
+            diagnostic.code == "ambiguous_overlapping_signal"
+            for diagnostic in parsed.diagnostics
+        ))
+
     def test_does_not_treat_generic_signal_word_as_symbol(self) -> None:
         parser = RegexSignalParser.default()
 
@@ -102,6 +185,26 @@ class RegexSignalParserTest(unittest.TestCase):
         assert outcome is not None
         self.assertEqual(outcome.result, "WIN")
         self.assertEqual(outcome.symbol, "EURUSD")
+
+    def test_multiple_outcomes_without_symbols_are_not_assigned_global_symbols(self) -> None:
+        parser = RegexSignalParser.from_payload(
+            {
+                "outcome_rules": [
+                    {
+                        "name": "result-only",
+                        "pattern": r"(?P<result>WIN|LOSS)",
+                    }
+                ]
+            }
+        )
+
+        parsed = parser.parse_message(raw("WIN EURUSD\nLOSS GBPUSD"))
+
+        self.assertEqual([outcome.symbol for outcome in parsed.outcomes], ["", ""])
+        self.assertTrue(any(
+            diagnostic.code == "ambiguous_outcome_symbol"
+            for diagnostic in parsed.diagnostics
+        ))
 
     def test_returns_none_for_unmatched_message(self) -> None:
         parser = RegexSignalParser.default()

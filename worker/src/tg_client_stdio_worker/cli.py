@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend",
         choices=["mock", "telethon"],
-        default="mock",
+        default=None,
         help="Backend implementation to run.",
     )
     parser.add_argument("--api-id", type=int, help="Telegram API ID for Telethon backend.")
@@ -64,11 +64,14 @@ def main(argv: list[str] | None = None) -> int:
         error_stream=sys.stderr,
         backend=backend,
         config=ServerConfig(max_jsonl_bytes=args.max_jsonl_bytes),
+        backend_name=args.backend,
     )
     return server.run()
 
 
 def build_backend(args: argparse.Namespace) -> object:
+    if args.backend is None:
+        raise ValueError("one of --mock or --backend must be specified")
     if args.backend == "mock":
         return MockTelegramBackend()
 

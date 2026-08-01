@@ -40,12 +40,14 @@ class JsonlWorkerServer:
         error_stream: TextIO,
         backend: TelegramBackend,
         config: ServerConfig | None = None,
+        backend_name: str | None = None,
     ) -> None:
         self._input = input_stream
         self._output = output_stream
         self._error = error_stream
         self._backend = backend
         self._config = config or ServerConfig()
+        self._backend_name = backend_name or _infer_backend_name(backend)
         self._shutdown_requested = False
         self._exit_code = 0
 
@@ -167,6 +169,7 @@ class JsonlWorkerServer:
         return {
             "worker_name": "tg-client-stdio-worker",
             "worker_version": __version__,
+            "backend": self._backend_name,
             "capabilities": {
                 "dialogs_list": True,
                 "messages_export": True,
@@ -217,3 +220,9 @@ class JsonlWorkerServer:
         except ProtocolError as write_exc:
             print(f"failed to serialize correlated error: {write_exc.message}", file=self._error)
             return False
+
+
+def _infer_backend_name(backend: TelegramBackend) -> str:
+    if isinstance(backend, MockTelegramBackend):
+        return "mock"
+    return "unknown"

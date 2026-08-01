@@ -11,7 +11,7 @@ dependencies = []
 
 [project.optional-dependencies]
 telegram = [
-  "telethon>=1.37,<2",
+  "telethon>=1.44,<2",
   "python-dotenv>=1,<2",
 ]
 dev = []

@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from tg_client_stdio_worker.backend import ExportQuery, MockTelegramBackend, RawMessage
-from tg_client_stdio_worker.cli import build_parser
+from tg_client_stdio_worker.cli import build_parser, main
 from tg_client_stdio_worker.protocol import (
     MIN_MAX_JSONL_RECORD_BYTES,
     Envelope,
@@ -382,6 +382,11 @@ class ProtocolTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 build_parser().parse_args(["--mock", "--max-jsonl-bytes", "-2"])
+
+    def test_cli_requires_explicit_backend(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(main([]), 2)
+        self.assertIn("one of --mock or --backend must be specified", stderr.getvalue())
 
     def test_rejects_nan_and_infinity_on_input(self) -> None:
         for constant in (b"NaN", b"Infinity", b"-Infinity"):

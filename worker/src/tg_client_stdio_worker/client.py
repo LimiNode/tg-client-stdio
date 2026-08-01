@@ -49,28 +49,30 @@ class JsonlWorkerClient:
         self._local_max_outbound_jsonl_bytes = max_jsonl_bytes
         self._max_outbound_jsonl_bytes = max_jsonl_bytes
         self._next_request_id = 1
+        self._session_error: WorkerClientError | None = None
 
     def request(self, operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         request_id = self._send_request(operation, payload or {})
         while True:
             record = self._read_record()
             if record.request_id != request_id:
-                raise WorkerClientError(
+                raise self._poison_session(
                     "unexpected_record",
                     f"unexpected request_id {record.request_id}",
-                    fatal=True,
                 )
             if record.message_type == "response":
                 if record.operation != operation:
-                    raise WorkerClientError(
+                    raise self._poison_session(
                         "unexpected_operation",
                         f"unexpected terminal operation {record.operation}",
-                        fatal=True,
                     )
                 return record.payload
             if record.message_type == "error":
-                raise self._worker_error(record)
-            raise WorkerClientError(
+                worker_error = self._worker_error(record)
+                if worker_error.fatal:
+                    self._poison_session(worker_error.code, worker_error.message)
+                raise worker_error
+            raise self._poison_session(
                 "unexpected_event",
                 f"unexpected event before terminal response: {record.operation}",
             )
@@ -96,57 +98,64 @@ class JsonlWorkerClient:
         while True:
             record = self._read_record()
             if record.request_id != request_id:
-                raise WorkerClientError(
+                raise self._poison_session(
                     "unexpected_record",
                     f"unexpected request_id {record.request_id}",
-                    fatal=True,
                 )
             if record.message_type == "event":
                 if record.operation == "export.started":
                     continue
                 if record.operation != "export.message":
-                    raise WorkerClientError(
+                    raise self._poison_session(
                         "unexpected_event",
                         f"unexpected export event {record.operation}",
                     )
                 message = record.payload.get("message")
                 if not isinstance(message, dict):
-                    raise WorkerClientError(
+                    raise self._poison_session(
                         "invalid_event",
                         "export.message payload must contain a message object",
                     )
-                on_message(message)
+                try:
+                    on_message(message)
+                except BaseException as exc:
+                    failure = self._poison_session(
+                        "callback_failed",
+                        "export callback failed; worker session is unusable",
+                    )
+                    raise failure from exc
                 continue
             if record.message_type == "response":
                 if record.operation != "messages.export":
-                    raise WorkerClientError(
+                    raise self._poison_session(
                         "unexpected_operation",
                         f"unexpected terminal operation {record.operation}",
-                        fatal=True,
                     )
                 messages = record.payload.get("messages")
                 truncated = record.payload.get("truncated")
                 if type(messages) is not int or messages < 0:
-                    raise WorkerClientError(
+                    raise self._poison_session(
                         "invalid_response",
                         "messages.export response messages must be a non-negative integer",
-                        fatal=True,
                     )
                 if type(truncated) is not bool:
-                    raise WorkerClientError(
+                    raise self._poison_session(
                         "invalid_response",
                         "messages.export response truncated must be boolean",
-                        fatal=True,
                     )
                 return ExportSummary(messages=messages, truncated=truncated)
             if record.message_type == "error":
-                raise self._worker_error(record)
-            raise WorkerClientError("unexpected_record", "unexpected worker record")
+                worker_error = self._worker_error(record)
+                if worker_error.fatal:
+                    self._poison_session(worker_error.code, worker_error.message)
+                raise worker_error
+            raise self._poison_session("unexpected_record", "unexpected worker record")
 
     def shutdown(self) -> dict[str, Any]:
         return self.request("shutdown")
 
     def _send_request(self, operation: str, payload: dict[str, Any]) -> int:
+        self._ensure_session_usable()
         request_id = self._next_request_id
         self._next_request_id += 1
         envelope = Envelope(
@@ -162,23 +171,30 @@ class JsonlWorkerClient:
     def _read_record(self) -> Envelope:
         raw = self._input.readline(self._max_inbound_jsonl_bytes + 1)
         if raw == b"":
-            raise WorkerClientError("worker_eof", "worker stdout closed", fatal=True)
+            raise self._poison_session("worker_eof", "worker stdout closed")
         if len(raw) > self._max_inbound_jsonl_bytes:
-            raise WorkerClientError(
+            raise self._poison_session(
                 "jsonl_record_too_large",
                 "inbound JSONL record is too large",
-                fatal=True,
             )
         if not raw.endswith(b"\n"):
-            raise WorkerClientError(
+            raise self._poison_session(
                 "unterminated_jsonl_record",
                 "inbound JSONL record must end with LF",
-                fatal=True,
             )
         try:
             return decode_envelope(raw)
         except ProtocolError as exc:
-            raise WorkerClientError(exc.code, exc.message, fatal=True) from exc
+            raise self._poison_session(exc.code, exc.message) from exc
+
+    def _ensure_session_usable(self) -> None:
+        if self._session_error is not None:
+            raise self._session_error
+
+    def _poison_session(self, code: str, message: str) -> WorkerClientError:
+        if self._session_error is None:
+            self._session_error = WorkerClientError(code, message, fatal=True)
+        return self._session_error
 
     @staticmethod
     def _worker_error(record: Envelope) -> WorkerClientError:
@@ -212,16 +228,18 @@ class JsonlWorkerClient:
     def _apply_hello_capabilities(self, payload: dict[str, Any]) -> None:
         capabilities = payload.get("capabilities")
         if not isinstance(capabilities, dict):
-            raise WorkerClientError("invalid_response", "hello response must contain capabilities", fatal=True)
+            raise self._poison_session(
+                "invalid_response",
+                "hello response must contain capabilities",
+            )
         max_jsonl_record_bytes = capabilities.get("max_jsonl_record_bytes")
         if (
             type(max_jsonl_record_bytes) is not int
             or max_jsonl_record_bytes < MIN_MAX_JSONL_RECORD_BYTES
         ):
-            raise WorkerClientError(
+            raise self._poison_session(
                 "invalid_response",
                 "hello capabilities max_jsonl_record_bytes is below protocol minimum",
-                fatal=True,
             )
         self._max_outbound_jsonl_bytes = min(
             self._local_max_outbound_jsonl_bytes,

@@ -13,7 +13,7 @@ from .protocol import DEFAULT_MAX_JSONL_RECORD_BYTES, MIN_MAX_JSONL_RECORD_BYTES
 
 @dataclass
 class WorkerProcessConfig:
-    args: list[str] = field(default_factory=lambda: ["--mock"])
+    args: list[str] = field(default_factory=list)
     executable: str = sys.executable
     command: list[str] | None = None
     max_jsonl_bytes: int = DEFAULT_MAX_JSONL_RECORD_BYTES
@@ -27,6 +27,10 @@ class WorkerProcess:
 
     def __init__(self, config: WorkerProcessConfig | None = None) -> None:
         self._config = config or WorkerProcessConfig()
+        if self._config.command is None and not self._config.args:
+            raise ValueError(
+                "worker args must explicitly select a backend, such as --mock "
+                "or --backend telethon")
         if self._config.max_jsonl_bytes < MIN_MAX_JSONL_RECORD_BYTES:
             raise ValueError(
                 f"max_jsonl_bytes must be at least {MIN_MAX_JSONL_RECORD_BYTES}")
