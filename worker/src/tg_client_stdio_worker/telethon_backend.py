@@ -84,6 +84,11 @@ class TelethonBackend:
                     "invalid_export_query",
                     "topic_id requires a Telegram forum entity",
                 )
+            if reply_to == 1:
+                raise BackendError(
+                    "unsupported_export_query",
+                    "exporting the General forum topic is not supported",
+                )
             if reply_to is not None:
                 resolved_topic = self._resolve_forum_topic(
                     client,

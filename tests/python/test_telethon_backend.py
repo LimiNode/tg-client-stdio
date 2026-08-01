@@ -343,6 +343,24 @@ class TelethonBackendCliTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "invalid_export_query")
         self.assertIn("forum topic", str(caught.exception))
 
+    def test_general_forum_topic_is_rejected_explicitly(self) -> None:
+        backend = TelethonBackend(
+            TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
+            telegram_client_factory=lambda *args, **kwargs: FakeTelethonClient(
+                *args,
+                entity=FakeEntity(forum=True),
+                messages=[FakeMessage(id=10, date=_dt(1784830000000))],
+                **kwargs,
+            ),
+        )
+
+        with self.assertRaises(BackendError) as caught:
+            list(backend.iter_export_messages(
+                ExportQuery(chat="-10042", topic_id="001")))
+
+        self.assertEqual(caught.exception.code, "unsupported_export_query")
+        self.assertIn("General forum topic", str(caught.exception))
+
     def test_channel_post_replies_do_not_create_forum_topic_identity(self) -> None:
         backend = TelethonBackend(
             TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
