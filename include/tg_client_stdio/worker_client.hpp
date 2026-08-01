@@ -4,6 +4,7 @@
 /// \brief C++17 process supervisor and JSONL client for tg-client-stdio.
 
 #include "protocol.hpp"
+#include "messages.hpp"
 
 #include <nlohmann/json.hpp>
 #include <process.hpp>
@@ -34,6 +35,7 @@ struct WorkerProcessConfig {
     std::size_t max_queued_records = 4096;
     std::size_t max_queued_bytes = 16u * 1024u * 1024u;
     std::chrono::milliseconds startup_timeout{5000};
+    std::chrono::milliseconds request_timeout{30000};
     std::chrono::milliseconds shutdown_timeout{5000};
     std::function<void(const std::string&)> on_stderr;
 };
@@ -70,6 +72,7 @@ public:
             config.max_queued_records == 0 ||
             config.max_queued_bytes == 0 ||
             config.startup_timeout <= std::chrono::milliseconds::zero() ||
+            config.request_timeout <= std::chrono::milliseconds::zero() ||
             config.shutdown_timeout <= std::chrono::milliseconds::zero()) {
             return false;
         }
@@ -140,7 +143,7 @@ public:
             std::move(operation), std::move(payload),
             std::move(request_event_handler));
         const auto effective_timeout = timeout <= std::chrono::milliseconds::zero()
-            ? config_snapshot().startup_timeout
+            ? config_snapshot().request_timeout
             : timeout;
         const auto record = wait_for_response(request_id, effective_timeout);
         const auto type = record.value("message_type", "");
@@ -211,6 +214,38 @@ public:
     /// \brief Submits a Telegram two-factor password.
     json auth_submit_password(std::string password) {
         return request("auth.submit_password", json{{"password", std::move(password)}});
+    }
+
+    /// \brief Streams historical raw messages without accumulating them.
+    ExportSummary stream_messages(
+            const ExportQuery& query,
+            const std::function<void(const RawMessage&)>& on_message) {
+        if (!on_message) {
+            throw std::invalid_argument("messages.export callback must not be empty");
+        }
+        auto callback = [&](const json& record) {
+            const auto operation = record.value("operation", "");
+            if (operation == "export.started") {
+                return;
+            }
+            if (operation != "export.message") {
+                mark_failure("worker emitted an unexpected export event");
+                return;
+            }
+            try {
+                const auto payload = record.value("payload", json::object());
+                on_message(RawMessage::from_json(payload.at("message")));
+            }
+            catch (...) {
+                mark_failure("messages.export callback or payload failed");
+            }
+        };
+        const auto response = request(
+            "messages.export",
+            query.to_json(),
+            config_snapshot().request_timeout,
+            std::move(callback));
+        return ExportSummary::from_json(response);
     }
 
     /// \brief Stops the worker gracefully, then kills it after the timeout.
