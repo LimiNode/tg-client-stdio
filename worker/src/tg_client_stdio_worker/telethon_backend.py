@@ -303,7 +303,15 @@ class TelethonBackend:
                         chat_title,
                         last_message_id,
                         is_forum) in enumerate(watches):
-                    messages = list(client.iter_messages(input_entity, limit=100))
+                    # Read oldest-first after the last observed ID. Using the
+                    # default newest-first order can skip the middle of a
+                    # burst when more than one page arrives between polls.
+                    messages = list(client.iter_messages(
+                        input_entity,
+                        limit=100,
+                        min_id=last_message_id,
+                        reverse=True,
+                    ))
                     new_messages = [
                         message for message in messages
                         if int(getattr(message, "id", 0) or 0) > last_message_id
