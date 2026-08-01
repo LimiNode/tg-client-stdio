@@ -1,0 +1,6 @@
+[submodule "external/cpp/tiny-process-library"]
+	path = external/cpp/tiny-process-library
+	url = https://gitlab.com/eidheim/tiny-process-library.git
+[submodule "external/cpp/nlohmann-json"]
+	path = external/cpp/nlohmann-json
+	url = https://github.com/nlohmann/json.git

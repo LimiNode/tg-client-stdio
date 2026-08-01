@@ -12,6 +12,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+add_subdirectory(external/cpp/tiny-process-library EXCLUDE_FROM_ALL)
+add_subdirectory(external/cpp/nlohmann-json EXCLUDE_FROM_ALL)
+
 add_library(tg_client_stdio INTERFACE)
 add_library(tg-client-stdio::tg_client_stdio ALIAS tg_client_stdio)
 
@@ -21,6 +24,11 @@ target_include_directories(tg_client_stdio
 )
 
 target_compile_features(tg_client_stdio INTERFACE cxx_std_17)
+target_link_libraries(tg_client_stdio
+    INTERFACE
+        tiny-process-library::tiny-process-library
+        nlohmann_json::nlohmann_json
+)
 
 if(TG_CLIENT_STDIO_BUILD_TESTS)
     enable_testing()
@@ -42,4 +50,20 @@ if(TG_CLIENT_STDIO_BUILD_TESTS)
             tg-client-stdio::tg_client_stdio
     )
     add_test(NAME tg_client_stdio_client_test COMMAND tg_client_stdio_client_test)
+
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_executable(tg_worker_client_test
+            tests/cpp/worker_client_test.cpp
+        )
+        target_compile_definitions(tg_worker_client_test
+            PRIVATE
+                TG_CLIENT_STDIO_TEST_PYTHON_EXECUTABLE="${Python3_EXECUTABLE}"
+        )
+        target_link_libraries(tg_worker_client_test
+            PRIVATE
+                tg-client-stdio::tg_client_stdio
+        )
+        add_test(NAME tg_worker_client_test COMMAND tg_worker_client_test)
+    endif()
 endif()
