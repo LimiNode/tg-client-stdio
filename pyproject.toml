@@ -13,6 +13,7 @@ dependencies = []
 telegram = [
   "telethon>=1.44,<2",
   "python-dotenv>=1,<2",
+  "PySocks>=1.7,<2",
 ]
 dev = []
 

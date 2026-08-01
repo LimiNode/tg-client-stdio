@@ -61,6 +61,12 @@ python -m pip install -e ".[telegram]"
 tg-client-stdio-worker --backend telethon --api-id 123 --api-hash ... --session ./session
 ```
 
+The Telegram client and its asyncio loop are owned by one dedicated worker
+thread. Host requests are serialized through that owner; the Telethon client
+must not be used directly from host or callback threads. The `telegram` extra
+also installs `PySocks`, which is required for `socks5://` and `socks5h://`
+proxy URLs.
+
 The worker also exposes `auth.status`, `auth.send_code`,
 `auth.submit_code`, and `auth.submit_password` over JSONL. This keeps stdin
 reserved for protocol records while allowing a host application to own the
