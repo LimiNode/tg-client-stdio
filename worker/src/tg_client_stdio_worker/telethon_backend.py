@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from threading import Event, Lock, Thread, current_thread
 from typing import Any, Callable, Iterable
 
-from .backend import BackendError, Dialog, ExportQuery, RawMessage
+from .backend import BackendError, Dialog, ExportQuery, LiveQuery, RawMessage
 
 _TELEGRAM_INT32_MIN = -0x8000_0000
 _TELEGRAM_INT32_MAX = 0x7FFF_FFFF
@@ -16,6 +17,7 @@ class TelethonBackendConfig:
     api_hash: str
     session: str
     proxy: Any = None
+    live_poll_interval_seconds: float = 1.0
 
 
 class TelethonBackend:
@@ -35,6 +37,11 @@ class TelethonBackend:
         self._client: Any | None = None
         self._telegram_client_factory = telegram_client_factory
         self._forum_topic_resolver = forum_topic_resolver
+        if config.live_poll_interval_seconds <= 0:
+            raise ValueError("live_poll_interval_seconds must be positive")
+        self._live_lock = Lock()
+        self._live_stop: Event | None = None
+        self._live_thread: Thread | None = None
 
     def dialogs(self) -> Iterable[Dialog]:
         try:
@@ -144,6 +151,116 @@ class TelethonBackend:
         except Exception as exc:
             raise BackendError("telegram_backend_error", str(exc)) from exc
 
+    def start_listening(
+            self,
+            query: LiveQuery,
+            on_message: Callable[[RawMessage], None],
+            on_error: Callable[[BackendError], None]) -> None:
+        with self._live_lock:
+            if self._live_thread is not None:
+                raise BackendError("listen_already_active", "a live listener is already active")
+
+            try:
+                client = self._authorized_client()
+                watches = self._prepare_live_watches(client, query)
+            except BackendError:
+                raise
+            except Exception as exc:
+                raise BackendError("telegram_backend_error", str(exc)) from exc
+
+            stop = Event()
+            thread = Thread(
+                target=self._poll_live,
+                args=(client, watches, query, stop, on_message, on_error),
+                name="tg-client-stdio-live",
+                daemon=True,
+            )
+            self._live_stop = stop
+            self._live_thread = thread
+            thread.start()
+
+    def stop_listening(self) -> None:
+        with self._live_lock:
+            stop = self._live_stop
+            thread = self._live_thread
+            self._live_stop = None
+            self._live_thread = None
+        if stop is None or thread is None:
+            return
+        stop.set()
+        if thread is not current_thread():
+            thread.join()
+
+    def _prepare_live_watches(
+            self,
+            client: Any,
+            query: LiveQuery) -> list[tuple[Any, str, str, int, bool]]:
+        watches: list[tuple[Any, str, str, int, bool]] = []
+        for chat in query.chats:
+            entity = client.get_entity(_telethon_chat_ref(chat))
+            input_entity = client.get_input_entity(entity)
+            canonical_chat_id = _canonical_peer_id(entity)
+            chat_title = _entity_title(entity, chat)
+            latest = next(iter(client.iter_messages(input_entity, limit=1)), None)
+            last_message_id = int(getattr(latest, "id", 0) or 0)
+            watches.append((
+                input_entity,
+                canonical_chat_id,
+                chat_title,
+                last_message_id,
+                bool(getattr(entity, "forum", False)),
+            ))
+        return watches
+
+    def _poll_live(
+            self,
+            client: Any,
+            watches: list[tuple[Any, str, str, int, bool]],
+            query: LiveQuery,
+            stop: Event,
+            on_message: Callable[[RawMessage], None],
+            on_error: Callable[[BackendError], None]) -> None:
+        try:
+            while not stop.is_set():
+                for index, (
+                        input_entity,
+                        chat_id,
+                        chat_title,
+                        last_message_id,
+                        is_forum) in enumerate(watches):
+                    messages = list(client.iter_messages(input_entity, limit=100))
+                    new_messages = [
+                        message for message in messages
+                        if int(getattr(message, "id", 0) or 0) > last_message_id
+                    ]
+                    if not new_messages:
+                        continue
+                    new_messages.sort(key=lambda message: int(message.id))
+                    watches[index] = (
+                        input_entity,
+                        chat_id,
+                        chat_title,
+                        max(int(message.id) for message in new_messages),
+                        is_forum,
+                    )
+                    for message in new_messages:
+                        topic_id = _message_topic_id(
+                            message,
+                            None,
+                            is_forum=is_forum,
+                        )
+                        if query.topic_ids and topic_id not in query.topic_ids:
+                            continue
+                        on_message(_raw_message(
+                            message,
+                            chat_id=chat_id,
+                            chat_title=chat_title,
+                            topic_id=topic_id,
+                        ))
+                stop.wait(self._config.live_poll_interval_seconds)
+        except Exception as exc:
+            on_error(BackendError("telegram_live_error", str(exc), fatal=False))
+
     def _authorized_client(self) -> Any:
         if self._client is None:
             factory = self._telegram_client_factory or _load_telegram_client_factory()
@@ -202,6 +319,7 @@ class TelethonBackend:
         return None
 
     def close(self) -> None:
+        self.stop_listening()
         client = self._client
         self._client = None
         if client is not None:
@@ -227,6 +345,27 @@ def _topic_id_to_reply_to(topic_id: str) -> int | None:
         raise BackendError("invalid_export_query", "topic_id must be a decimal integer")
     numeric = int(topic_id)
     return numeric if numeric > 0 else None
+
+
+def _raw_message(
+        message: Any,
+        *,
+        chat_id: str,
+        chat_title: str,
+        topic_id: str) -> RawMessage:
+    return RawMessage(
+        chat_id=chat_id,
+        chat_title=chat_title,
+        topic_id=topic_id,
+        message_id=int(message.id),
+        date_ms=_datetime_to_ms(message.date),
+        edit_date_ms=_datetime_to_ms(getattr(message, "edit_date", None)),
+        sender_id=str(getattr(message, "sender_id", "") or ""),
+        reply_to_message_id=int(getattr(message, "reply_to_msg_id", 0) or 0),
+        grouped_id=str(getattr(message, "grouped_id", "") or ""),
+        text=str(getattr(message, "raw_text", "") or ""),
+        media=[],
+    )
 
 
 def _is_forum_topic_record(topic: Any, topic_id: int) -> bool:

@@ -7,7 +7,12 @@ import unittest
 from collections.abc import Iterable
 from typing import Any
 
-from tg_client_stdio_worker.backend import ExportQuery, MockTelegramBackend, RawMessage
+from tg_client_stdio_worker.backend import (
+    ExportQuery,
+    LiveQuery,
+    MockTelegramBackend,
+    RawMessage,
+)
 from tg_client_stdio_worker.cli import build_parser, main
 from tg_client_stdio_worker.protocol import (
     MIN_MAX_JSONL_RECORD_BYTES,
@@ -32,6 +37,55 @@ def request(request_id: int, operation: str, payload: dict | None = None) -> byt
 
 
 class ProtocolTest(unittest.TestCase):
+    def test_live_listener_emits_worker_originated_event_and_stops(self) -> None:
+        backend = MockTelegramBackend()
+        output_stream = io.BytesIO()
+        server = JsonlWorkerServer(
+            input_stream=io.BytesIO(),
+            output_stream=output_stream,
+            error_stream=io.StringIO(),
+            backend=backend,
+        )
+
+        server._handle_request(Envelope(
+            message_type="request",
+            request_id=10,
+            operation="messages.listen",
+            payload={"chats": ["-10042"]},
+        ))
+        backend.emit_live_message(RawMessage(
+            chat_id="-10042",
+            chat_title="Signals",
+            topic_id="0",
+            message_id=9,
+            date_ms=1784830000000,
+            text="EURUSD BUY 5m",
+        ))
+        server._handle_request(Envelope(
+            message_type="request",
+            request_id=11,
+            operation="messages.stop",
+            payload={},
+        ))
+
+        records = [
+            json.loads(line)
+            for line in output_stream.getvalue().decode("utf-8").splitlines()
+            if line
+        ]
+        self.assertEqual(records[0]["operation"], "messages.listen")
+        self.assertEqual(records[0]["message_type"], "response")
+        self.assertEqual(records[1]["request_id"], 0)
+        self.assertEqual(records[1]["operation"], "message.received")
+        self.assertEqual(records[1]["payload"]["message"]["message_id"], 9)
+        self.assertEqual(records[2]["operation"], "messages.stop")
+
+    def test_live_query_requires_unique_non_empty_chats(self) -> None:
+        with self.assertRaises(ValueError):
+            LiveQuery.from_payload({"chats": []})
+        with self.assertRaises(ValueError):
+            LiveQuery.from_payload({"chats": ["-10042", "-10042"]})
+
     def test_round_trips_envelope(self) -> None:
         line = request(7, "hello", {"client_name": "unit-test"})
 

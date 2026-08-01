@@ -36,6 +36,24 @@ class WorkerProcessTest(unittest.TestCase):
         finally:
             worker.close()
 
+    def test_starts_and_stops_mock_live_listener(self) -> None:
+        worker = WorkerProcess(
+            WorkerProcessConfig(
+                args=["--mock"],
+                executable=sys.executable,
+            )
+        )
+        try:
+            client = worker.start(stderr=subprocess.DEVNULL)
+            accepted = client.start_listening(["-1001234567890"])
+            self.assertTrue(accepted["accepted"])
+            self.assertEqual(
+                client.stop_listening(),
+                {"stopped": True},
+            )
+        finally:
+            worker.close()
+
     def test_context_manager_closes_worker(self) -> None:
         worker = WorkerProcess(
             WorkerProcessConfig(
