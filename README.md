@@ -76,6 +76,22 @@ login UI. Proxy URLs can be supplied with `--proxy` using `http://`,
 Interactive Telegram login is intentionally outside JSONL stdio; stdin is
 reserved for protocol records.
 
+An opt-in authorized-session smoke test is available for operator validation.
+It never runs in normal CI unless explicitly enabled:
+
+```powershell
+$env:TG_CLIENT_STDIO_E2E = "1"
+$env:TG_CLIENT_STDIO_API_ID = "123456"
+$env:TG_CLIENT_STDIO_API_HASH = "..."
+$env:TG_CLIENT_STDIO_SESSION = "C:\path\to\session"
+$env:TG_CLIENT_STDIO_E2E_CHAT = "@signal_channel"
+python -m unittest discover -s tests/python -p test_telethon_authorized_e2e.py
+```
+
+The test checks the existing authorization state, lists dialogs, and exports
+at most one message from the configured chat. It does not print credentials or
+perform interactive login. Clear these environment variables after the run.
+
 Example request:
 
 ```json
