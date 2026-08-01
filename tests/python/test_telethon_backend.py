@@ -5,7 +5,7 @@ import importlib.util
 import io
 import json
 import sys
-from threading import Event
+from threading import Event, get_ident
 import unittest
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -131,9 +131,11 @@ class FakeTelethonClient:
         self.last_entity_ref: Any | None = None
         self.last_iter_messages_chat: Any | None = None
         self.last_forum_request: Any | None = None
+        self.thread_ids: list[int] = []
         FakeTelethonClient.last_instance = self
 
     def connect(self) -> None:
+        self.thread_ids.append(get_ident())
         if self.connect_raises:
             raise RuntimeError("connect failed")
         self.connected = True
@@ -155,6 +157,7 @@ class FakeTelethonClient:
         self.authorized = True
 
     def iter_dialogs(self) -> list[FakeDialog]:
+        self.thread_ids.append(get_ident())
         return [FakeDialog(id=-10042, name="Signals", entity=self.entity)]
 
     def get_entity(self, chat: str | int) -> FakeEntity:
@@ -185,6 +188,7 @@ class FakeTelethonClient:
         return None
 
     def iter_messages(self, chat: Any, **kwargs: Any) -> Iterable[FakeMessage]:
+        self.thread_ids.append(get_ident())
         self.last_iter_messages_chat = chat
         self.iter_messages_kwargs = kwargs
         offset_date = kwargs.get("offset_date")
@@ -217,7 +221,6 @@ class TelethonBackendCliTest(unittest.TestCase):
             FakeMessage(id=3, date=_dt(3000)),
             FakeMessage(id=4, date=_dt(4000)),
         ]
-        client = FakeTelethonClient(messages=messages)
         backend = TelethonBackend(
             TelethonBackendConfig(
                 api_id=1,
@@ -225,27 +228,89 @@ class TelethonBackendCliTest(unittest.TestCase):
                 session="session",
                 live_poll_interval_seconds=0.01,
             ),
+            telegram_client_factory=lambda *args, **kwargs: FakeTelethonClient(
+                *args, messages=messages, **kwargs),
         )
-        stop = Event()
+        stopped = Event()
         received: list[int] = []
 
         def collect(message: Any) -> None:
             received.append(message.message_id)
             if len(received) == 3:
-                stop.set()
+                stopped.set()
 
-        backend._poll_live(
-            client,
-            [(client.entity, "-10042", "Signals", 1, False)],
+        backend.start_listening(
             LiveQuery(chats=("-10042",)),
-            stop,
             collect,
             lambda exc: self.fail(str(exc)),
         )
+        self.assertTrue(stopped.wait(2.0))
+        backend.stop_listening()
 
         self.assertEqual(received, [2, 3, 4])
+        client = FakeTelethonClient.last_instance
+        assert client is not None
         self.assertEqual(client.iter_messages_kwargs["min_id"], 1)
         self.assertTrue(client.iter_messages_kwargs["reverse"])
+
+    def test_live_listener_can_restart_after_poll_failure(self) -> None:
+        errors: list[BackendError] = []
+        failed = Event()
+        calls = 0
+
+        class FailingOnceClient(FakeTelethonClient):
+            def iter_messages(self, chat: Any, **kwargs: Any) -> Iterable[FakeMessage]:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise RuntimeError("poll failed")
+                return super().iter_messages(chat, **kwargs)
+
+        backend = TelethonBackend(
+            TelethonBackendConfig(
+                api_id=1,
+                api_hash="hash",
+                session="session",
+                live_poll_interval_seconds=0.01,
+            ),
+            telegram_client_factory=lambda *args, **kwargs: FailingOnceClient(
+                *args,
+                messages=[FakeMessage(id=1, date=_dt(1000))],
+                **kwargs,
+            ),
+        )
+
+        backend.start_listening(
+            LiveQuery(chats=("-10042",)),
+            lambda _message: None,
+            lambda exc: (errors.append(exc), failed.set()),
+        )
+        self.assertTrue(failed.wait(2.0))
+        self.assertEqual([error.code for error in errors], ["telegram_live_error"])
+
+        backend.start_listening(
+            LiveQuery(chats=("-10042",)),
+            lambda _message: None,
+            self.fail,
+        )
+        backend.stop_listening()
+
+    def test_telethon_client_operations_stay_on_owner_thread(self) -> None:
+        backend = TelethonBackend(
+            TelethonBackendConfig(api_id=1, api_hash="hash", session="session"),
+            telegram_client_factory=lambda *args, **kwargs: FakeTelethonClient(
+                *args,
+                messages=[FakeMessage(id=10, date=_dt(1784830000000))],
+                **kwargs,
+            ),
+        )
+
+        list(backend.dialogs())
+        list(backend.iter_export_messages(ExportQuery(chat="-10042")))
+        client = FakeTelethonClient.last_instance
+        assert client is not None
+        self.assertTrue(client.thread_ids)
+        self.assertEqual(len(set(client.thread_ids)), 1)
 
     def test_auth_operations_support_code_and_two_factor_flow(self) -> None:
         backend = TelethonBackend(
@@ -289,6 +354,14 @@ class TelethonBackendCliTest(unittest.TestCase):
         self.assertEqual(proxy[0], 5)
         self.assertEqual(proxy[1:4], ("127.0.0.1", 1080, False))
         self.assertEqual(proxy[4:], ("user", "p@ss"))
+
+    def test_telegram_extra_provides_proxy_dependency(self) -> None:
+        import socks
+        from tg_client_stdio_worker.cli import parse_proxy
+
+        self.assertTrue(hasattr(socks, "SOCKS5"))
+        proxy = parse_proxy("socks5://127.0.0.1:1080")
+        self.assertEqual(proxy[0], socks.SOCKS5)
 
     def test_proxy_url_requires_supported_scheme(self) -> None:
         from tg_client_stdio_worker.cli import parse_proxy
@@ -812,7 +885,7 @@ class TelethonBackendCliTest(unittest.TestCase):
 
         client = FakeTelethonClient.last_instance
         self.assertIn("connect failed", str(caught.exception))
-        self.assertIsNone(backend._client)
+        self.assertFalse(backend._runtime.has_client())
         assert client is not None
         self.assertTrue(client.disconnected)
 

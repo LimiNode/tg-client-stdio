@@ -225,6 +225,10 @@ After that response, each live message is emitted as a worker-originated
 The host must keep draining the event stream or stop the listener rather than
 allow unbounded buffering.
 
+If polling terminates with a non-fatal error, the worker clears the active
+listener before emitting the error event. A subsequent `messages.listen`
+request may therefore start a new listener.
+
 ### `messages.stop`
 
 Stops the active live listener. It is idempotent and returns
