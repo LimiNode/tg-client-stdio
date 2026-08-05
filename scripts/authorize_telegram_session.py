@@ -7,6 +7,7 @@ import argparse
 import getpass
 import json
 import sys
+from pathlib import Path
 
 from tg_client_stdio_worker.backend import BackendError
 from tg_client_stdio_worker.cli import parse_proxy
@@ -29,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def authorize(args: argparse.Namespace) -> int:
+    Path(args.session).expanduser().parent.mkdir(parents=True, exist_ok=True)
     backend = TelethonBackend(
         TelethonBackendConfig(
             api_id=args.api_id,
