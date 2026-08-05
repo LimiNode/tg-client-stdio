@@ -73,6 +73,19 @@ reserved for protocol records while allowing a host application to own the
 login UI. Proxy URLs can be supplied with `--proxy` using `http://`,
 `socks5://`, or `socks5h://` schemes.
 
+For a one-time interactive session setup, use the helper script. It stores the
+Telethon session locally and prints only a non-secret status record:
+
+```powershell
+python scripts/authorize_telegram_session.py `
+  --api-id 123 --api-hash ... --session .\sessions\account-a `
+  --phone +10000000000 --proxy socks5://127.0.0.1:1080
+```
+
+The script asks for the login code and, when enabled, the 2FA password without
+echoing the password. Use a separate session path and preferably a separate
+proxy per account when operating multiple accounts.
+
 Interactive Telegram login is intentionally outside JSONL stdio; stdin is
 reserved for protocol records.
 
@@ -85,6 +98,7 @@ $env:TG_CLIENT_STDIO_API_ID = "123456"
 $env:TG_CLIENT_STDIO_API_HASH = "..."
 $env:TG_CLIENT_STDIO_SESSION = "C:\path\to\session"
 $env:TG_CLIENT_STDIO_E2E_CHAT = "@signal_channel"
+$env:TG_CLIENT_STDIO_PROXY = "socks5://127.0.0.1:1080"
 python -m unittest discover -s tests/python -p test_telethon_authorized_e2e.py
 ```
 

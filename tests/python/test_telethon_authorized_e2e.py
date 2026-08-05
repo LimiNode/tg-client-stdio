@@ -4,6 +4,7 @@ import os
 import unittest
 
 from tg_client_stdio_worker.backend import ExportQuery
+from tg_client_stdio_worker.cli import parse_proxy
 from tg_client_stdio_worker.telethon_backend import TelethonBackend, TelethonBackendConfig
 
 
@@ -30,11 +31,13 @@ class TelethonAuthorizedSessionE2ETest(unittest.TestCase):
     def setUpClass(cls) -> None:
         values = _required_environment()
         cls.chat = values["chat"]
+        proxy_url = os.environ.get("TG_CLIENT_STDIO_PROXY", "").strip()
         cls.backend = TelethonBackend(
             TelethonBackendConfig(
                 api_id=int(values["api_id"]),
                 api_hash=values["api_hash"],
                 session=values["session"],
+                proxy=parse_proxy(proxy_url) if proxy_url else None,
             ),
         )
 
