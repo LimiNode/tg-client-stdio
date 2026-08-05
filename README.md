@@ -82,6 +82,19 @@ python scripts/authorize_telegram_session.py `
   --phone +10000000000 --proxy socks5://127.0.0.1:1080
 ```
 
+Proxy credentials belong in the URL and must be percent-encoded. For example,
+`p@ss:word` becomes `p%40ss%3Aword`:
+
+```powershell
+$env:TG_CLIENT_STDIO_PROXY = "socks5://proxy-user:p%40ss%3Aword@127.0.0.1:1080"
+python scripts/authorize_telegram_session.py `
+  --api-id 123 --api-hash ... --session .\sessions\account-a
+```
+
+Using the environment variable avoids exposing the proxy password in shell
+history and process arguments. The parser decodes the username and password
+before passing them to PySocks.
+
 The script asks for the login code and, when enabled, the 2FA password without
 echoing the password. Use a separate session path and preferably a separate
 proxy per account when operating multiple accounts.

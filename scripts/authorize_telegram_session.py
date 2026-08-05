@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -24,20 +25,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phone", help="Phone number in international format.")
     parser.add_argument(
         "--proxy",
-        help="Proxy URL: http://, socks5://, or socks5h://.",
+        help="Proxy URL; defaults to TG_CLIENT_STDIO_PROXY when omitted.",
     )
     return parser
 
 
 def authorize(args: argparse.Namespace) -> int:
     Path(args.session).expanduser().parent.mkdir(parents=True, exist_ok=True)
+    proxy_url = (args.proxy or os.environ.get("TG_CLIENT_STDIO_PROXY", "")).strip()
     backend = TelethonBackend(
         TelethonBackendConfig(
             api_id=args.api_id,
             api_hash=args.api_hash,
             session=args.session,
             phone=args.phone or "",
-            proxy=parse_proxy(args.proxy) if args.proxy else None,
+            proxy=parse_proxy(proxy_url) if proxy_url else None,
         )
     )
     try:
@@ -61,7 +63,7 @@ def authorize(args: argparse.Namespace) -> int:
         print(json.dumps({
             "authorized": True,
             "session": args.session,
-            "proxy_configured": bool(args.proxy),
+            "proxy_configured": bool(proxy_url),
         }, ensure_ascii=True, sort_keys=True))
         return 0
     finally:
