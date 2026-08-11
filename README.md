@@ -243,6 +243,7 @@ bounded JSONL input/output and event-queue limits:
 
 tg_client_stdio::WorkerProcessConfig config;
 config.command = {"python", "-m", "tg_client_stdio_worker", "--mock"};
+config.environment["TG_CLIENT_STDIO_TEST_ENV"] = "worker-a";
 
 tg_client_stdio::WorkerClient worker;
 worker.start(config, [](const auto& event) {
@@ -270,6 +271,12 @@ and authorization booleans before returning C++ DTOs.
 layer. One instance owns one worker and therefore one Telegram session. A
 host that needs several accounts should create one instance per session and
 coordinate them at the application level.
+
+`WorkerProcessConfig::environment` is per worker. An empty map inherits the
+parent process environment; a non-empty map is passed as the complete child
+environment. Put session, proxy, and other credentials there instead of in
+the worker command arguments. When using a non-empty map, include operational
+variables such as `PATH` when the command needs them.
 
 The C++ supervisor uses the vendored `tiny-process-library` and
 `nlohmann-json` submodules. They are implementation dependencies of this
