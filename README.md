@@ -58,7 +58,10 @@ The Telethon backend is optional and requires a pre-authorized session:
 
 ```powershell
 python -m pip install -e ".[telegram]"
-tg-client-stdio-worker --backend telethon --api-id 123 --api-hash ... --session ./session
+$env:TG_CLIENT_STDIO_API_ID = "123"
+$env:TG_CLIENT_STDIO_API_HASH = "..."
+$env:TG_CLIENT_STDIO_SESSION = ".\session"
+tg-client-stdio-worker --backend telethon
 ```
 
 The Telegram client and its asyncio loop are owned by one dedicated worker
@@ -118,6 +121,40 @@ python -m unittest discover -s tests/python -p test_telethon_authorized_e2e.py
 The test checks the existing authorization state, lists dialogs, and exports
 at most one message from the configured chat. It does not print credentials or
 perform interactive login. Clear these environment variables after the run.
+
+## Operator CLI
+
+After installing the package, `tg-client-stdio` provides small
+operator-facing wrappers around the existing worker operations. The repository
+script `scripts/tg_client_cli.py` remains a development wrapper. Both use the
+same `TG_CLIENT_STDIO_API_ID`, `TG_CLIENT_STDIO_API_HASH`,
+`TG_CLIENT_STDIO_SESSION`, and `TG_CLIENT_STDIO_PROXY` environment variables
+as the authorization helper.
+
+List all dialogs as a table, or search by chat id, title, username, or kind:
+
+```powershell
+tg-client-stdio dialogs
+tg-client-stdio dialogs --search "MONEY BOT"
+tg-client-stdio dialogs --search "MONEY BOT" --json
+```
+
+Export history without accumulating it in memory. stdout contains only one
+raw-message JSON object per line; the summary is written to stderr. Use `-` for
+stdout or `--output` for a file:
+
+```powershell
+tg-client-stdio export `
+  --chat "Сигналы MONEY BOT" `
+  --from 2026-08-01 `
+  --to 2026-08-10 `
+  --order oldest_first `
+  --output .\exports\money-bot.jsonl
+```
+
+`--from` and `--to` accept UTC milliseconds or ISO-8601. A date-only value
+covers the complete UTC day. `--limit` bounds the number of messages, and
+`--topic-id` selects a forum topic when supported by the worker.
 
 Example request:
 

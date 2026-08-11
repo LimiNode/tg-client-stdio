@@ -16,6 +16,7 @@ class WorkerProcessConfig:
     args: list[str] = field(default_factory=list)
     executable: str = sys.executable
     command: list[str] | None = None
+    environment: dict[str, str] | None = None
     max_jsonl_bytes: int = DEFAULT_MAX_JSONL_RECORD_BYTES
     startup_hello: bool = True
     startup_timeout_seconds: float = 5.0
@@ -50,6 +51,7 @@ class WorkerProcess:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=stderr,
+            env=self._config.environment,
         )
         try:
             if process.stdin is None or process.stdout is None:
