@@ -119,6 +119,39 @@ The test checks the existing authorization state, lists dialogs, and exports
 at most one message from the configured chat. It does not print credentials or
 perform interactive login. Clear these environment variables after the run.
 
+## Operator CLI
+
+After installing the package, `scripts/tg_client_cli.py` provides small
+operator-facing wrappers around the existing worker operations. It uses the
+same `TG_CLIENT_STDIO_API_ID`, `TG_CLIENT_STDIO_API_HASH`,
+`TG_CLIENT_STDIO_SESSION`, and `TG_CLIENT_STDIO_PROXY` environment variables
+as the authorization helper.
+
+List all dialogs as a table, or search by chat id, title, username, or kind:
+
+```powershell
+python scripts/tg_client_cli.py dialogs
+python scripts/tg_client_cli.py dialogs --search "MONEY BOT"
+python scripts/tg_client_cli.py dialogs --search "MONEY BOT" --json
+```
+
+Export history without accumulating it in memory. stdout contains only one
+raw-message JSON object per line; the summary is written to stderr. Use `-` for
+stdout or `--output` for a file:
+
+```powershell
+python scripts/tg_client_cli.py export `
+  --chat "Сигналы MONEY BOT" `
+  --from 2026-08-01 `
+  --to 2026-08-10 `
+  --order oldest_first `
+  --output .\exports\money-bot.jsonl
+```
+
+`--from` and `--to` accept UTC milliseconds or ISO-8601. A date-only value
+covers the complete UTC day. `--limit` bounds the number of messages, and
+`--topic-id` selects a forum topic when supported by the worker.
+
 Example request:
 
 ```json
