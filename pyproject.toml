@@ -19,6 +19,7 @@ dev = []
 
 [project.scripts]
 tg-client-stdio-worker = "tg_client_stdio_worker.__main__:main"
+tg-client-stdio = "tg_client_stdio_worker.operator_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["worker/src"]

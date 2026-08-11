@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -67,6 +68,38 @@ class OperatorCliTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("--from must not be later than --to", result.stderr)
+
+    def test_export_output_preserves_existing_file_on_worker_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "history.jsonl"
+            output.write_text("old archive\n", encoding="utf-8")
+
+            failed = self.run_cli(
+                "export",
+                "--chat",
+                "-10042",
+                "--output",
+                str(output),
+            )
+
+            self.assertEqual(failed.returncode, 2)
+            self.assertEqual(output.read_text(encoding="utf-8"), "old archive\n")
+
+            succeeded = self.run_cli(
+                "export",
+                "--mock",
+                "--chat",
+                "-10042",
+                "--output",
+                str(output),
+            )
+
+            self.assertEqual(succeeded.returncode, 0, succeeded.stderr)
+            records = [
+                json.loads(line)
+                for line in output.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual([record["message_id"] for record in records], [1234, 1235])
 
 
 if __name__ == "__main__":

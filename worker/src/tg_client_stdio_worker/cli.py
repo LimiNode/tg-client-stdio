@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from urllib.parse import unquote, urlsplit
 
@@ -22,6 +23,11 @@ def jsonl_byte_limit(value: str) -> int:
     return parsed
 
 
+def _env_int(name: str) -> int | None:
+    value = os.environ.get(name, "").strip()
+    return int(value) if value else None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Telegram user-client JSONL stdio worker",
@@ -39,13 +45,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Backend implementation to run.",
     )
-    parser.add_argument("--api-id", type=int, help="Telegram API ID for Telethon backend.")
-    parser.add_argument("--api-hash", help="Telegram API hash for Telethon backend.")
-    parser.add_argument("--session", help="Telethon session path/name.")
-    parser.add_argument("--phone", help="Default phone number for auth.send_code.")
+    parser.add_argument(
+        "--api-id",
+        type=int,
+        default=_env_int("TG_CLIENT_STDIO_API_ID"),
+        help="Telegram API ID; defaults to TG_CLIENT_STDIO_API_ID.",
+    )
+    parser.add_argument(
+        "--api-hash",
+        default=os.environ.get("TG_CLIENT_STDIO_API_HASH"),
+        help="Telegram API hash; defaults to TG_CLIENT_STDIO_API_HASH.",
+    )
+    parser.add_argument(
+        "--session",
+        default=os.environ.get("TG_CLIENT_STDIO_SESSION"),
+        help="Telethon session path/name; defaults to TG_CLIENT_STDIO_SESSION.",
+    )
+    parser.add_argument(
+        "--phone",
+        default=os.environ.get("TG_CLIENT_STDIO_PHONE"),
+        help="Default phone number for auth.send_code.",
+    )
     parser.add_argument(
         "--proxy",
-        help="Proxy URL, for example socks5://127.0.0.1:1080 or http://user:pass@host:8080.",
+        default=os.environ.get("TG_CLIENT_STDIO_PROXY"),
+        help="Proxy URL; defaults to TG_CLIENT_STDIO_PROXY.",
     )
     parser.add_argument(
         "--live-poll-interval",

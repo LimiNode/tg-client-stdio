@@ -58,7 +58,10 @@ The Telethon backend is optional and requires a pre-authorized session:
 
 ```powershell
 python -m pip install -e ".[telegram]"
-tg-client-stdio-worker --backend telethon --api-id 123 --api-hash ... --session ./session
+$env:TG_CLIENT_STDIO_API_ID = "123"
+$env:TG_CLIENT_STDIO_API_HASH = "..."
+$env:TG_CLIENT_STDIO_SESSION = ".\session"
+tg-client-stdio-worker --backend telethon
 ```
 
 The Telegram client and its asyncio loop are owned by one dedicated worker
@@ -121,8 +124,9 @@ perform interactive login. Clear these environment variables after the run.
 
 ## Operator CLI
 
-After installing the package, `scripts/tg_client_cli.py` provides small
-operator-facing wrappers around the existing worker operations. It uses the
+After installing the package, `tg-client-stdio` provides small
+operator-facing wrappers around the existing worker operations. The repository
+script `scripts/tg_client_cli.py` remains a development wrapper. Both use the
 same `TG_CLIENT_STDIO_API_ID`, `TG_CLIENT_STDIO_API_HASH`,
 `TG_CLIENT_STDIO_SESSION`, and `TG_CLIENT_STDIO_PROXY` environment variables
 as the authorization helper.
@@ -130,9 +134,9 @@ as the authorization helper.
 List all dialogs as a table, or search by chat id, title, username, or kind:
 
 ```powershell
-python scripts/tg_client_cli.py dialogs
-python scripts/tg_client_cli.py dialogs --search "MONEY BOT"
-python scripts/tg_client_cli.py dialogs --search "MONEY BOT" --json
+tg-client-stdio dialogs
+tg-client-stdio dialogs --search "MONEY BOT"
+tg-client-stdio dialogs --search "MONEY BOT" --json
 ```
 
 Export history without accumulating it in memory. stdout contains only one
@@ -140,7 +144,7 @@ raw-message JSON object per line; the summary is written to stderr. Use `-` for
 stdout or `--output` for a file:
 
 ```powershell
-python scripts/tg_client_cli.py export `
+tg-client-stdio export `
   --chat "Сигналы MONEY BOT" `
   --from 2026-08-01 `
   --to 2026-08-10 `
