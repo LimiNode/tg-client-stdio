@@ -38,6 +38,9 @@ struct WorkerProcessConfig {
     std::chrono::milliseconds request_timeout{30000};
     std::chrono::milliseconds shutdown_timeout{5000};
     std::function<void(const std::string&)> on_stderr;
+    /// Per-process environment. An empty map inherits the parent environment;
+    /// a non-empty map is passed as the complete child environment.
+    std::unordered_map<std::string, std::string> environment;
 };
 
 /// \class WorkerClient
@@ -88,16 +91,32 @@ public:
         }
 
         try {
-            auto process = std::make_unique<TinyProcessLib::Process>(
-                config_.command,
-                config_.working_directory,
-                [this](const char* bytes, std::size_t size) {
-                    on_stdout(bytes, size);
-                },
-                [this](const char* bytes, std::size_t size) {
-                    on_stderr(bytes, size);
-                },
-                true);
+            std::unique_ptr<TinyProcessLib::Process> process;
+            if (config_.environment.empty()) {
+                process = std::make_unique<TinyProcessLib::Process>(
+                    config_.command,
+                    config_.working_directory,
+                    [this](const char* bytes, std::size_t size) {
+                        on_stdout(bytes, size);
+                    },
+                    [this](const char* bytes, std::size_t size) {
+                        on_stderr(bytes, size);
+                    },
+                    true);
+            }
+            else {
+                process = std::make_unique<TinyProcessLib::Process>(
+                    config_.command,
+                    config_.working_directory,
+                    process_environment(config_.environment),
+                    [this](const char* bytes, std::size_t size) {
+                        on_stdout(bytes, size);
+                    },
+                    [this](const char* bytes, std::size_t size) {
+                        on_stderr(bytes, size);
+                    },
+                    true);
+            }
             std::lock_guard<std::mutex> lock(mutex_);
             process_ = std::move(process);
         }
@@ -347,6 +366,25 @@ public:
     }
 
 private:
+    static TinyProcessLib::Process::environment_type process_environment(
+            const std::unordered_map<std::string, std::string>& environment) {
+        TinyProcessLib::Process::environment_type result;
+        for (const auto& entry : environment) {
+#ifdef _WIN32
+#ifdef UNICODE
+            result.emplace(
+                std::wstring(entry.first.begin(), entry.first.end()),
+                std::wstring(entry.second.begin(), entry.second.end()));
+#else
+            result.emplace(entry.first, entry.second);
+#endif
+#else
+            result.emplace(entry.first, entry.second);
+#endif
+        }
+        return result;
+    }
+
     struct QueuedRecord {
         json value;
         std::size_t bytes = 0;

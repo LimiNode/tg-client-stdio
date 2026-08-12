@@ -24,6 +24,7 @@ void expect(bool condition, const char* message) {
 int main() {
     const std::string worker_script = R"PY(
 import json
+import os
 import sys
 
 def send(request_id, message_type, operation, payload):
@@ -42,7 +43,11 @@ for line in sys.stdin:
     request_id = request["request_id"]
     if operation == "hello":
         send(request_id, "response", operation, {
-            "capabilities": {"messages_listen": True, "messages_stop": True},
+            "capabilities": {
+                "messages_listen": True,
+                "messages_stop": True,
+                "test_environment": os.environ.get("TG_CLIENT_STDIO_TEST_ENV", ""),
+            },
             "max_jsonl_record_bytes": 1048576,
         })
     elif operation == "dialogs.list":
@@ -98,6 +103,7 @@ for line in sys.stdin:
         "-c",
         worker_script,
     };
+    config.environment["TG_CLIENT_STDIO_TEST_ENV"] = "per-process";
     config.max_jsonl_record_bytes = 4096;
     config.startup_timeout = std::chrono::seconds(5);
     config.shutdown_timeout = std::chrono::seconds(5);
@@ -121,6 +127,10 @@ for line in sys.stdin:
         condition.notify_all();
     }), "worker did not start");
     expect(client.is_running(), "worker is not running after handshake");
+
+    const auto hello = client.request("hello");
+    expect(hello.at("capabilities").at("test_environment") == "per-process",
+           "per-process environment mismatch");
 
     const auto dialogs = client.dialogs();
     expect(dialogs.at("dialogs").at(0).at("chat_id") == "42",
