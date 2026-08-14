@@ -117,9 +117,15 @@ class OperatorCliTest(unittest.TestCase):
             }], as_json=True)
             stream.flush()
 
+        decoded = buffer.getvalue().decode("utf-8")
         self.assertEqual(
-            buffer.getvalue().decode("utf-8"),
-            '[{"chat_id":"-10042","title":"Сигналы MONEY BOT","username":"","kind":"channel"}]\r\n',
+            json.loads(decoded),
+            [{
+                "chat_id": "-10042",
+                "title": "Сигналы MONEY BOT",
+                "username": "",
+                "kind": "channel",
+            }],
         )
 
 
