@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from tg_client_stdio_worker import operator_cli
 
 ROOT = Path(__file__).resolve().parents[2]
 CLI = ROOT / "scripts" / "tg_client_cli.py"
@@ -100,6 +103,30 @@ class OperatorCliTest(unittest.TestCase):
                 for line in output.read_text(encoding="utf-8").splitlines()
             ]
             self.assertEqual([record["message_id"] for record in records], [1234, 1235])
+
+    def test_unicode_output_is_utf8_when_console_uses_legacy_encoding(self) -> None:
+        buffer = io.BytesIO()
+        stream = io.TextIOWrapper(buffer, encoding="cp1252")
+        with mock.patch.object(operator_cli.sys, "stdout", stream):
+            operator_cli._configure_utf8_stdio()
+            operator_cli._print_dialogs([{
+                "chat_id": "-10042",
+                "title": "Сигналы MONEY BOT",
+                "username": "",
+                "kind": "channel",
+            }], as_json=True)
+            stream.flush()
+
+        decoded = buffer.getvalue().decode("utf-8")
+        self.assertEqual(
+            json.loads(decoded),
+            [{
+                "chat_id": "-10042",
+                "title": "Сигналы MONEY BOT",
+                "username": "",
+                "kind": "channel",
+            }],
+        )
 
 
 if __name__ == "__main__":
