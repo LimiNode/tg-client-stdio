@@ -15,6 +15,14 @@ from tg_client_stdio_worker.client import WorkerClientError
 from tg_client_stdio_worker.process import WorkerProcess, WorkerProcessConfig
 
 
+def _configure_utf8_stdio() -> None:
+    """Make human-facing CLI output independent of the Windows code page."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="strict")
+
+
 def _load_local_env() -> None:
     try:
         from dotenv import load_dotenv
@@ -313,6 +321,7 @@ def run_export(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_stdio()
     _load_local_env()
     args = build_parser().parse_args(argv)
     try:
@@ -326,4 +335,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
